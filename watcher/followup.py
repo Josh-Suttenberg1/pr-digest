@@ -67,9 +67,14 @@ Reply rules: address the PR author by handle, plain English, at most 3 sentences
 commit (short sha) that fixed it. If it's not addressed, say concretely what is still missing.
 No bare acceptance-criteria labels. Don't add a signature.
 
+"mechanical" is true only when the commits do exactly what Josh's comment asked, as he asked
+it: no pushback, no different approach, nothing he asked left open. Explaining a separate
+question from someone else in the thread doesn't make it false.
+
 Output ONLY a JSON object, no prose, no code fences:
 {{"verdict": "addressed" | "partly" | "not_addressed",
-  "evidence": [{{"file": "...", "line": 0, "sha": "...", "note": "..."}}],
+  "mechanical": true | false,
+  "evidence": [{{"file": "...", "line": 0, "sha": "<full or short sha of the fixing commit>", "note": "..."}}],
   "reply": "..."}}
 """
 
@@ -224,7 +229,89 @@ def parse_result(text: str) -> dict:
     if not str(data.get("reply") or "").strip():
         raise ValueError("empty reply")
     data["evidence"] = [e for e in data.get("evidence") or [] if isinstance(e, dict)]
+    data["mechanical"] = data.get("mechanical") is True
     return data
+
+
+# --- automatic re-approval ------------------------------------------------------------
+
+
+def reapproval_body(repo: str, shas: list[str]) -> str:
+    links = [f"[{s[:7]}](https://github.com/avetta/{repo}/commit/{s})" for s in shas]
+    if len(links) == 1:
+        lead = f"the author's commit {links[0]} addresses"
+    else:
+        lead = f"the author's commits {', '.join(links[:-1])} and {links[-1]} address"
+    return f"Reapproving, {lead} my comment.\n\n{FOOTER}"
+
+
+def _josh_reviews(repo: str, number: int) -> list[dict] | None:
+    proc = subprocess.run(["gh", "api", f"repos/avetta/{repo}/pulls/{number}/reviews",
+                           "--paginate", "--jq", ".[]"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        return None
+    return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+
+
+def reapproval_plan(job: dict, result: dict, cfg: dict, clone: Path) -> tuple[list[str] | None, str]:
+    """(fix commit shas to cite, reason). shas is None when Josh must decide himself.
+
+    Re-approve only when the author did exactly what Josh's comment asked, Josh's latest
+    decision on the PR is an approval that predates the current head, and the head
+    hasn't moved since the follow-up looked at it.
+    """
+    pr = job["pr"]
+    if not cfg["watcher"].get("auto_reapprove", True):
+        return None, "auto re-approval is off"
+    if result["verdict"] != "addressed" or not result["mechanical"]:
+        return None, "not a mechanical fix"
+    if job["actor"] != pr["author"]:
+        return None, "the response came from someone other than the PR author"
+    view = subprocess.run(["gh", "pr", "view", str(pr["number"]), "--repo", f"avetta/{pr['repo']}",
+                           "--json", "state,headRefOid"], capture_output=True, text=True)
+    try:
+        live = json.loads(view.stdout)
+    except ValueError:
+        return None, "couldn't read the PR"
+    if live.get("state") != "OPEN" or live.get("headRefOid") != job["head"]:
+        return None, "the PR moved or closed after the follow-up ran"
+    me = cfg["me"]
+    reviews = _josh_reviews(pr["repo"], pr["number"])
+    if reviews is None:
+        return None, "couldn't read the reviews"
+    mine = [r for r in reviews if (r.get("user") or {}).get("login") == me
+            and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")]
+    if not mine or mine[-1]["state"] != "APPROVED":
+        return None, "your latest decision on the PR isn't an approval"
+    if mine[-1].get("commit_id") == job["head"]:
+        return None, "you already approved the current head"
+    shas = []
+    for e in result["evidence"]:
+        sha = str(e.get("sha") or "").strip()
+        if not sha:
+            continue
+        full = _git(clone, "rev-parse", "--verify", f"{sha}^{{commit}}").stdout.strip()
+        if (full and full not in shas
+                and _git(clone, "merge-base", "--is-ancestor", job["arm_commit"], full).returncode == 0
+                and _git(clone, "merge-base", "--is-ancestor", full, job["head"]).returncode == 0
+                and full != job["arm_commit"]):
+            shas.append(full)
+    if not shas:
+        return None, "no fixing commit between your comment and the head"
+    return shas, "mechanical fix on a PR you approved"
+
+
+def reapprove(job: dict, shas: list[str]) -> str | None:
+    """Post the APPROVE review on the job's head. Returns its URL, or None on failure."""
+    pr = job["pr"]
+    payload = JOBS_DIR / f"{job['id']}.reapprove.json"
+    payload.write_text(json.dumps({"commit_id": job["head"], "event": "APPROVE",
+                                   "body": reapproval_body(pr["repo"], shas)}))
+    proc = subprocess.run(["gh", "api", "-X", "POST",
+                           f"repos/avetta/{pr['repo']}/pulls/{pr['number']}/reviews",
+                           "--input", str(payload), "--jq", ".html_url"],
+                          capture_output=True, text=True)
+    return proc.stdout.strip() if proc.returncode == 0 else None
 
 
 def with_footer(reply: str) -> str:
@@ -289,9 +376,22 @@ def run(jid: str, cfg: dict | None = None) -> int:
     reply_path = stem.with_name(stem.name + ".reply.md")
     reply_path.write_text(with_footer(result["reply"]) + "\n")
     stem.with_suffix(".json").write_text(json.dumps({**result, "job": jid}, indent=2) + "\n")
-    job.update(status="ready", verdict=result["verdict"], report=str(stem.with_suffix(".md")),
+    job.update(status="ready", verdict=result["verdict"], mechanical=result["mechanical"],
+               report=str(stem.with_suffix(".md")),
                reply_file=str(reply_path), cost_usd=envelope.get("total_cost_usd"),
                finished_at=int(time.time()))
+    shas, why = reapproval_plan(job, result, cfg, clone)
+    job["reapproval"] = why
+    if shas:
+        url = reapprove(job, shas)
+        if url:
+            job.update(status="reapproved", posted_url=url)
+            save_job(job)
+            who = cfg.get("nicknames", {}).get(job["actor"], job["actor"])
+            notify.banner(f"✅ Re-approved: {who} did what you asked", render.subtitle(pr),
+                          f"Fixed in {', '.join(s[:7] for s in shas)}", href=url)
+            return 0
+        job["reapproval"] = "posting the approval failed; decide yourself"
     save_job(job)
     shown = render.render({"type": "verdict", "verdict": result["verdict"], "actor": job["actor"],
                            "pr": pr, "url": Path(job["report"]).as_uri()},

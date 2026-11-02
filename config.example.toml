@@ -24,6 +24,7 @@ required_approvals = 2
 max_concurrent = 2               # follow-up runs at once
 followup_timeout = 600           # seconds
 max_notifs_per_tick = 6
+auto_reapprove = true            # re-approve when the author did exactly what your comment asked
 bots = ["copilot-pull-request-reviewer", "avettabot"]
 reports_dir = "~/avetta/JoshWorkspace/pr_followups"
 

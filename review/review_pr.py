@@ -7,7 +7,8 @@ and interactive "review <ticket key>" sessions all call it. Steps:
 
 1. Check that the claude CLI is logged in.
 2. claude -p --agent pr-reviewer, from claude_cwd so the Avetta CLAUDE.md loads.
-3. claude -p --agent pr-review-verifier on the reviewer's output.
+3. claude -p --agent pr-review-verifier on the reviewer's output, only when it has
+   findings beyond nits (anything that could be posted to a coworker).
 4. Write <KEY>-<repo>.md (+ .json sidecar) per PR to the drafts dir, plus
    <KEY>-story.md when one ticket covered several PRs, and an index entry per PR
    in state/reviews/ for the menu bar.
@@ -260,8 +261,10 @@ def review(target: str, phase_file: Path | None, refresh_plugin: str | None,
     reviewer_out = run_dir / "reviewer.md"
     reviewer_out.write_text(env1["result"])
 
+    # The verifier exists to stop wrong findings reaching a coworker. A clean or
+    # nits-only review has nothing worth refuting, so it skips the second run.
     final, env2 = env1["result"], None
-    if not skip_verifier:
+    if not skip_verifier and severity_of(env1["result"]) == "substantive":
         _phase(phase_file, f"{rcfg['verifier_agent']} is checking the findings", refresh_plugin)
         env2 = run_agent(
             rcfg["verifier_agent"], f"Verify the review at {reviewer_out}.", cwd,
@@ -279,7 +282,7 @@ def review(target: str, phase_file: Path | None, refresh_plugin: str | None,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "duration_s": int(time.time() - started),
         "cost_usd": round(sum(e.get("total_cost_usd", 0) or 0 for e in (env1, env2) if e), 2),
-        "verified": not skip_verifier,
+        "verified": env2 is not None,
         "run_dir": str(run_dir),
     }
     return write_drafts(final, meta, settings.path_of(rcfg["drafts_dir"]))

@@ -40,6 +40,9 @@ DEFAULTS: dict = {
         "max_concurrent": 2,
         "followup_timeout": 600,
         "max_notifs_per_tick": 6,
+        # Re-approve a PR Josh already approved when its author did exactly what his
+        # comment asked (see watcher/followup.py reapproval_plan).
+        "auto_reapprove": True,
         "bots": ["copilot-pull-request-reviewer", "avettabot"],
         "reports_dir": "~/avetta/JoshWorkspace/pr_followups",
     },
