@@ -5,7 +5,8 @@
     python -m watcher post <job> | dismiss <job>       menu bar actions on a follow-up
     python -m watcher followup-run <job>               one follow-up (started by tick)
     python -m watcher notify-test                      one alert and one banner
-    python -m watcher install                          write and load the launchd job
+    python -m watcher install                          write and load the launchd jobs (the
+                                                       watcher, and the weekly lessons refresh)
 
 The first tick with no saved state records everything as seen and sends nothing.
 """
@@ -33,6 +34,10 @@ from watcher import followup, gh, render, state  # noqa: E402
 LABEL = "com.josh.pr-digest-watcher"
 PLIST = Path(f"~/Library/LaunchAgents/{LABEL}.plist").expanduser()
 LOG = Path("~/.cache/pr-digest/watcher.log").expanduser()
+# The weekly review-lessons refresh (review/harvest_lessons.py --apply), Mondays 07:00.
+LESSONS_LABEL = "com.josh.pr-digest-lessons"
+LESSONS_PLIST = Path(f"~/Library/LaunchAgents/{LESSONS_LABEL}.plist").expanduser()
+LESSONS_LOG = Path("~/.cache/pr-digest/lessons.log").expanduser()
 SWEEP_EVERY = 900
 FIRST_SIGHT_GRACE = timedelta(minutes=5)
 
@@ -222,12 +227,26 @@ def install(cfg: dict) -> int:
             "PATH": f"{Path('~/.local/bin').expanduser()}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         },
     }
-    PLIST.write_bytes(plistlib.dumps(plist))
-    subprocess.run(["launchctl", "bootout", f"gui/{_uid()}/{LABEL}"], capture_output=True)
-    proc = subprocess.run(["launchctl", "bootstrap", f"gui/{_uid()}", str(PLIST)],
-                          capture_output=True, text=True)
-    print(f"wrote {PLIST}; launchctl bootstrap exit {proc.returncode} {proc.stderr.strip()}")
-    return proc.returncode
+    lessons = {
+        "Label": LESSONS_LABEL,
+        "ProgramArguments": [sys.executable, str(settings.REPO_DIR / "review" / "harvest_lessons.py"),
+                             "--apply"],
+        "WorkingDirectory": str(settings.REPO_DIR),
+        "StartCalendarInterval": {"Weekday": 1, "Hour": 7, "Minute": 0},
+        "Nice": 10,
+        "StandardOutPath": str(LESSONS_LOG),
+        "StandardErrorPath": str(LESSONS_LOG),
+        "EnvironmentVariables": plist["EnvironmentVariables"],
+    }
+    rc = 0
+    for label, path, body in ((LABEL, PLIST, plist), (LESSONS_LABEL, LESSONS_PLIST, lessons)):
+        path.write_bytes(plistlib.dumps(body))
+        subprocess.run(["launchctl", "bootout", f"gui/{_uid()}/{label}"], capture_output=True)
+        proc = subprocess.run(["launchctl", "bootstrap", f"gui/{_uid()}", str(path)],
+                              capture_output=True, text=True)
+        print(f"wrote {path}; launchctl bootstrap exit {proc.returncode} {proc.stderr.strip()}")
+        rc = rc or proc.returncode
+    return rc
 
 
 def notify_test(cfg: dict) -> int:

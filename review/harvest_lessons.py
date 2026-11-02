@@ -1,6 +1,9 @@
-"""Harvest review comments that PR authors acted on, and propose review lessons.
+"""Harvest review comments that PR authors acted on, and keep review lessons current.
 
-    review/harvest_lessons.py [--days 90] [--no-propose]
+    review/harvest_lessons.py [--days 90] [--no-propose] [--apply]
+
+launchd runs it with --apply every Monday morning (com.josh.pr-digest-lessons, written by
+`bin/watcher install`).
 
 1. Harvest (deterministic, read-only). Every PR in the configured repos updated in
    the window is searched, and each review thread is kept only when:
@@ -12,10 +15,14 @@
 
 2. Propose (claude -p on models.lessons). The threads are too many for one context,
    so chunks of CHUNK threads each yield candidate rules (candidates-<date>.json),
-   then one run merges them, keeps rules backed by 3+ threads, drops anything a repo's
-   .ai/ files, the recurring checks, or the existing lessons already cover, and writes
-   <out_dir>/proposals-<date>.md for Josh to approve one by one. Nothing is added to
-   review-lessons.md automatically.
+   then one run merges them, drops anything a repo's .ai/ files, the recurring checks,
+   or Josh's pinned lessons already cover, and writes <out_dir>/proposals-<date>.json.
+
+3. Apply (--apply, deterministic). Lessons backed by MIN_THREADS+ threads from
+   MIN_REVIEWERS+ distinct reviewers, strongest MAX_LESSONS first, replace the auto block
+   of review-lessons.md; Josh's pinned lines outside it are never touched. A banner
+   reports what was added and removed. Nothing is written to any repo's .ai/ files;
+   lessons that belong there are marked as candidates.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import notify  # noqa: E402
 import settings  # noqa: E402
 
 LESSONS_FILE = Path("~/avetta/.claude/review/review-lessons.md").expanduser()
@@ -152,20 +160,27 @@ only rules backed by at least 3 threads, ideally from more than one reviewer.
 For each remaining rule, check whether it is already covered, and drop it if so:
 - the touched repo's .ai/ files (~/avetta/<repo>/.ai/*.md) and its CLAUDE.md / .claude/CLAUDE.md
 - {checks}
-- {lessons}
 - ~/avetta/.claude/elm-conventions.md (for ui)
+- these lessons Josh pinned by hand:
+{pinned}
 
-Write markdown only, no preamble. One section per proposed lesson, strongest first, at most 25:
-
-### <n>. <the rule, one imperative sentence a reviewer can check against a diff>
-- Seen: <count> threads, <repos>, reviewers <logins>
-- Examples: <2-3 thread URLs from the file>
-- Why it matters: <one sentence, from what the reviewers actually said>
-- Suggested home: review-lessons.md (cross-repo) or <repo>/.ai/<file> (repo-specific)
-
-End with a section "### Considered and dropped" listing, one line each, recurring points you
-dropped because an existing rule already covers them, naming that rule's file.
+Output ONLY a JSON object, no prose, no code fences:
+{{"lessons": [{{"rule": "<one imperative sentence a reviewer can check against a diff>",
+               "why": "<one sentence, from what the reviewers actually said>",
+               "repos": ["..."], "reviewers": ["<distinct logins>"], "count": <threads>,
+               "examples": ["<2-3 thread URLs>"],
+               "home": "review-lessons.md" or "<repo>/.ai/<file>"}}],
+  "dropped": [{{"rule": "...", "covered_by": "<file>"}}]}}
+Strongest first, at most 25 lessons.
 """
+
+# review-lessons.md: Josh's pinned lessons above AUTO_START are kept as written; the
+# block between the markers is rewritten by each --apply run.
+AUTO_START = "<!-- auto-lessons:start (rewritten weekly by harvest_lessons.py --apply) -->"
+AUTO_END = "<!-- auto-lessons:end -->"
+MIN_THREADS = 3
+MIN_REVIEWERS = 2
+MAX_LESSONS = 20
 
 
 def _claude(cfg: dict, prompt: str, tools: bool) -> str:
@@ -220,17 +235,79 @@ def propose(cfg: dict, threads: list[dict], days: int, out_dir: Path) -> Path:
 
     candidates_path = out_dir / f"candidates-{date.today()}.json"
     candidates_path.write_text(json.dumps(candidates, indent=2) + "\n")
+    pinned = pinned_lessons(LESSONS_FILE.read_text() if LESSONS_FILE.exists() else "")
     prompt = PROPOSE_PROMPT.format(
-        candidates=candidates_path, n=len(threads), days=days,
-        checks=CHECKS_FILE, lessons=LESSONS_FILE,
+        candidates=candidates_path, n=len(threads), days=days, checks=CHECKS_FILE,
+        pinned="\n".join(f"  {line}" for line in pinned) or "  (none)",
     )
-    result = _claude(cfg, prompt, tools=True)
-    out_path = out_dir / f"proposals-{date.today()}.md"
-    header = (f"# Proposed review lessons ({date.today()})\n\n"
-              f"From {len(threads)} acted-on review threads over {days} days. "
-              f"Approve each one before it goes into {LESSONS_FILE} or a repo's .ai/ files.\n\n")
-    out_path.write_text(header + result.strip() + "\n")
+    result = parse_proposals(_claude(cfg, prompt, tools=True))
+    out_path = out_dir / f"proposals-{date.today()}.json"
+    out_path.write_text(json.dumps(result, indent=2) + "\n")
     return out_path
+
+
+# --- turning proposals into review-lessons.md (pure, unit-tested) -------------------
+
+
+def parse_proposals(text: str) -> dict:
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise SystemExit("proposal run returned no JSON object")
+    data = json.loads(text[start:end + 1])
+    lessons = [l for l in data.get("lessons") or [] if isinstance(l, dict) and l.get("rule")]
+    return {"lessons": lessons, "dropped": data.get("dropped") or []}
+
+
+def pinned_lessons(text: str) -> list[str]:
+    """Josh's own lesson lines: every `- ` line outside the auto-generated block."""
+    if AUTO_START in text:
+        text = text.split(AUTO_START)[0] + text.split(AUTO_END)[-1]
+    return [line.strip() for line in text.splitlines() if line.strip().startswith("- ")]
+
+
+def qualifying(lessons: list[dict]) -> list[dict]:
+    keep = [l for l in lessons
+            if int(l.get("count") or 0) >= MIN_THREADS
+            and len(set(l.get("reviewers") or [])) >= MIN_REVIEWERS]
+    keep.sort(key=lambda l: int(l.get("count") or 0), reverse=True)
+    return keep[:MAX_LESSONS]
+
+
+def lesson_line(lesson: dict) -> str:
+    repos = ", ".join(lesson.get("repos") or []) or "all repos"
+    example = (lesson.get("examples") or [""])[0]
+    line = f"- {lesson['rule'].rstrip('.')}. ({repos}; seen {lesson['count']}×"
+    line += f"; e.g. {example})" if example else ")"
+    home = lesson.get("home") or ""
+    if "/.ai/" in home:
+        line += f" *Candidate for `{home}`.*"
+    return line
+
+
+def render_auto_block(lessons: list[dict], when: str) -> str:
+    body = "\n".join(lesson_line(l) for l in lessons) or "_(none qualified this run)_"
+    return (f"{AUTO_START}\n### Learned from acted-on review comments ({when})\n\n"
+            f"{body}\n{AUTO_END}")
+
+
+def apply_lessons(text: str, lessons: list[dict], when: str) -> str:
+    """review-lessons.md with its auto block replaced (or appended), pinned lines untouched."""
+    block = render_auto_block(lessons, when)
+    if AUTO_START in text and AUTO_END in text:
+        before = text.split(AUTO_START)[0]
+        after = text.split(AUTO_END, 1)[1]
+        return before + block + after
+    return text.rstrip() + "\n\n" + block + "\n"
+
+
+def changed_rules(old_text: str, new_text: str) -> tuple[list[str], list[str]]:
+    def rules(text: str) -> set[str]:
+        if AUTO_START not in text:
+            return set()
+        block = text.split(AUTO_START)[1].split(AUTO_END)[0]
+        return {line.split(" (")[0] for line in block.splitlines() if line.startswith("- ")}
+    old, new = rules(old_text), rules(new_text)
+    return sorted(new - old), sorted(old - new)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -238,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Harvest acted-on review comments into proposed lessons.")
     parser.add_argument("--days", type=int, default=cfg["lessons"]["days"])
     parser.add_argument("--no-propose", action="store_true", help="harvest only, no claude call")
+    parser.add_argument("--apply", action="store_true",
+                        help="rewrite the auto block of review-lessons.md and notify what changed")
     args = parser.parse_args(argv)
 
     out_dir = settings.path_of(cfg["lessons"]["out_dir"])
@@ -247,9 +326,21 @@ def main(argv: list[str] | None = None) -> int:
     harvest_path.write_text(json.dumps(threads, indent=2) + "\n")
     print(f"{len(threads)} acted-on threads → {harvest_path}", file=sys.stderr)
 
-    if not args.no_propose and threads:
-        proposals = propose(cfg, threads, args.days, out_dir)
-        print(f"proposals → {proposals}", file=sys.stderr)
+    if args.no_propose or not threads:
+        return 0
+    proposals_path = propose(cfg, threads, args.days, out_dir)
+    print(f"proposals → {proposals_path}", file=sys.stderr)
+    if args.apply:
+        lessons = qualifying(json.loads(proposals_path.read_text())["lessons"])
+        old = LESSONS_FILE.read_text()
+        new = apply_lessons(old, lessons, str(date.today()))
+        LESSONS_FILE.write_text(new)
+        added, removed = changed_rules(old, new)
+        print(f"review-lessons.md: {len(lessons)} auto lessons (+{len(added)} / −{len(removed)})",
+              file=sys.stderr)
+        if added or removed:
+            notify.banner("📚 Review lessons updated", f"+{len(added)} / −{len(removed)} lessons",
+                          (added or removed)[0][2:120], href=LESSONS_FILE.as_uri())
     return 0
 
 

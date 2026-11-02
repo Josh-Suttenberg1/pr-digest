@@ -54,5 +54,56 @@ class ParseCandidatesTests(unittest.TestCase):
         self.assertEqual(hl.parse_candidates("[not json]"), [])
 
 
+LESSONS_MD = f"""# Review lessons
+
+## Pinned
+
+- Batch per-row service calls (processservice)
+
+## Learned
+
+{hl.AUTO_START}
+{hl.AUTO_END}
+"""
+
+
+def lesson(rule, count=5, reviewers=("a", "b"), home="review-lessons.md"):
+    return {"rule": rule, "count": count, "reviewers": list(reviewers), "repos": ["ui"],
+            "examples": ["https://g/x"], "home": home}
+
+
+class ApplyTests(unittest.TestCase):
+    def test_qualifying_needs_three_threads_two_reviewers_and_caps(self):
+        many = [lesson(f"rule {i}", count=3 + i) for i in range(30)]
+        weak = [lesson("too few", count=2), lesson("one reviewer", reviewers=("a", "a"))]
+        kept = hl.qualifying(many + weak)
+        self.assertEqual(len(kept), hl.MAX_LESSONS)
+        self.assertEqual(kept[0]["rule"], "rule 29")
+        self.assertNotIn("too few", [k["rule"] for k in kept])
+        self.assertNotIn("one reviewer", [k["rule"] for k in kept])
+
+    def test_apply_replaces_only_the_auto_block(self):
+        first = hl.apply_lessons(LESSONS_MD, [lesson("Use String.isBlank")], "2026-11-02")
+        self.assertIn("- Batch per-row service calls (processservice)", first)
+        self.assertIn("- Use String.isBlank. (ui; seen 5×; e.g. https://g/x)", first)
+        second = hl.apply_lessons(first, [lesson("Alphabetize exposing lists")], "2026-11-09")
+        self.assertNotIn("String.isBlank", second)
+        self.assertEqual(second.count(hl.AUTO_START), 1)
+        self.assertEqual(hl.changed_rules(first, second),
+                         (["- Alphabetize exposing lists."], ["- Use String.isBlank."]))
+
+    def test_pinned_excludes_the_auto_block(self):
+        text = hl.apply_lessons(LESSONS_MD, [lesson("Learned one")], "d")
+        self.assertEqual(hl.pinned_lessons(text), ["- Batch per-row service calls (processservice)"])
+
+    def test_repo_specific_lesson_marked_as_candidate(self):
+        line = hl.lesson_line(lesson("Map 4xx by fault", home="processservice/.ai/coding-standards.md"))
+        self.assertTrue(line.endswith("*Candidate for `processservice/.ai/coding-standards.md`.*"))
+
+    def test_parse_proposals_tolerates_fences(self):
+        out = hl.parse_proposals('```json\n{"lessons": [{"rule": "r"}, {"x": 1}], "dropped": []}\n```')
+        self.assertEqual(out, {"lessons": [{"rule": "r"}], "dropped": []})
+
+
 if __name__ == "__main__":
     unittest.main()
