@@ -323,6 +323,8 @@ def render_menu(prs: list[dict], seen: dict[str, str], *, spinner: bool,
              sfimage="arrow.clockwise")
         print("---")
 
+    followups_block()
+
     if count == 0 and not error:
         emit("No PRs need your attention", color="#888888")
     elif count:
@@ -345,6 +347,87 @@ def render_menu(prs: list[dict], seen: dict[str, str], *, spinner: bool,
          terminal="false", refresh="true", sfimage="eye")
     age = cache_label()
     emit(f"Updated {age}", color="#888888")
+    emit(watcher_label(), color="#888888")
+
+
+WATCHER = REPO_DIR / "bin" / "watcher"
+VERDICT_MARKS = {"addressed": "✅", "partly": "🟡", "not_addressed": "🔴"}
+
+
+def followups_block() -> None:
+    """Follow-ups on Josh's review comments, from the watcher's job files.
+
+    A ready job shows the verdict and the full drafted reply; "Post this reply"
+    posts exactly that text (the click is Josh's approval), "Edit first" opens
+    the reply file, and posting then uses whatever the file holds.
+    """
+    try:
+        from watcher import followup, render
+    except Exception:  # noqa: BLE001 — the digest must render even if the watcher can't load
+        return
+    jobs = [j for j in followup.all_jobs() if j["status"] in ("ready", "running", "queued", "failed")]
+    if not jobs:
+        return
+    nick = _nicknames()
+    emit(f"Follow-ups on your review comments ({len(jobs)})", color="#888888")
+    for job in sorted(jobs, key=lambda j: j.get("finished_at") or 0, reverse=True):
+        who = nick.get(job["actor"], job["actor"])
+        sub = render.subtitle(job["pr"])
+        if job["status"] in ("running", "queued"):
+            emit(f"🔄 checking {who}'s commits · {sub}", href=job["url"])
+            continue
+        if job["status"] == "failed":
+            emit(f"⚠️ follow-up failed · {sub}", href=job["url"], color="#d08770")
+            emit(f"--{sanitize(job.get('error') or 'unknown error')}", color="#888888")
+            emit("--Dismiss", bash=str(WATCHER), param1="dismiss", param2=job["id"],
+                 terminal="false", refresh="true")
+            continue
+        verdict = job["verdict"].replace("_", " ")
+        emit(f"{VERDICT_MARKS.get(job['verdict'], '🔎')} {who}: {verdict} · {sub}", href=job["url"])
+        reply = Path(job["reply_file"]).read_text() if Path(job["reply_file"]).exists() else ""
+        emit("--Drafted reply:", color="#888888")
+        for line in reply.strip().splitlines():
+            if line.strip():
+                emit(f"--{truncate(sanitize(line), 90)}", tooltip=sanitize(line))
+        emit("-----")
+        emit("--✅ Post this reply", bash=str(WATCHER), param1="post", param2=job["id"],
+             terminal="false", refresh="true")
+        emit("--✏️ Edit first", bash="/usr/bin/open", param1="-t", param2=job["reply_file"],
+             terminal="false")
+        emit("--💬 Open in Claude", bash=str(REPO_DIR / ".venv" / "bin" / "python"),
+             param1=str(REPO_DIR / "session.py"), param2="--prompt",
+             param3=f"Let's go over the follow-up on my review comment: {job['report']}",
+             terminal="false")
+        emit("--📄 Open report", bash="/usr/bin/open", param1="-t", param2=job["report"],
+             terminal="false")
+        emit("--Dismiss", bash=str(WATCHER), param1="dismiss", param2=job["id"],
+             terminal="false", refresh="true")
+    print("---")
+
+
+def _nicknames() -> dict[str, str]:
+    try:
+        import settings
+        return settings.load().get("nicknames", {})
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def watcher_label() -> str:
+    """One footer line on the watcher's health, from its state file."""
+    path = REPO_DIR / "state" / "watcher" / "state.json"
+    try:
+        st = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return "Watcher: not running (bin/watcher install)"
+    backoff = st.get("backoff") or {}
+    if backoff.get("fails"):
+        return f"Watcher: GitHub failing ({backoff['fails']}×) — {sanitize(backoff.get('last_error', ''))[:60]}"
+    last = st.get("last_ok_at")
+    if not last:
+        return "Watcher: waiting for its first check"
+    when = datetime.fromisoformat(last.replace("Z", "+00:00")).astimezone()
+    return f"Watcher checked {when:%H:%M}"
 
 
 def cache_label() -> str:

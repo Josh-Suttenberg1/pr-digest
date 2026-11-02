@@ -1,0 +1,9 @@
+#!/bin/bash
+# Run the PR activity watcher (python -m watcher) from anywhere. See watcher/__main__.py.
+SELF="$0"
+if [ -L "$SELF" ]; then
+  T="$(readlink "$SELF")"
+  case "$T" in /*) SELF="$T" ;; *) SELF="$(dirname "$SELF")/$T" ;; esac
+fi
+REPO="$(cd "$(dirname "$SELF")/.." && pwd)"
+cd "$REPO" && exec "$REPO/.venv/bin/python" -m watcher "$@"
