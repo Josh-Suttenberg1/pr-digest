@@ -77,6 +77,7 @@ if [ -z "$ORG" ]; then
   echo "Set PR_REVIEW_ORG (GitHub org to scan), e.g. in $CONF_DIR/env. See README." >&2
   exit 1
 fi
+BASE="$(cd "$(dirname "$0")" && pwd)"
 STATE_DIR="$BASE/state"
 STATE_FILE="$STATE_DIR/state.tsv"
 DRAFT_LOG="$STATE_DIR/drafts.tsv"
