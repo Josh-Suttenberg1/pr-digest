@@ -1,0 +1,10 @@
+#!/bin/bash
+# Review a PR with the pr-reviewer and pr-review-verifier agents. See review/review_pr.py.
+# Self-locating, and resolves a symlink so it can be linked onto PATH.
+SELF="$0"
+if [ -L "$SELF" ]; then
+  T="$(readlink "$SELF")"
+  case "$T" in /*) SELF="$T" ;; *) SELF="$(dirname "$SELF")/$T" ;; esac
+fi
+REPO="$(cd "$(dirname "$SELF")/.." && pwd)"
+exec "$REPO/.venv/bin/python" "$REPO/review/review_pr.py" "$@"

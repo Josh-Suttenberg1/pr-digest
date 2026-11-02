@@ -1,0 +1,40 @@
+# Copy to ~/.config/pr-digest/config.toml. Every key is optional; settings.py holds the
+# defaults. The reviewer's model and effort live in the agent files
+# (~/avetta/.claude/agents/pr-reviewer.md and pr-review-verifier.md), not here.
+
+me = "your-github-login"
+org = "avetta"
+repos_root = "~/avetta"          # local clones live at <repos_root>/<repo>
+claude_cwd = "~/avetta"          # headless claude runs start here, so its CLAUDE.md loads
+
+[review]
+reviewer_agent = "pr-reviewer"
+verifier_agent = "pr-review-verifier"
+drafts_dir = "~/avetta/JoshWorkspace/code_reviews"
+timeout = 3600                   # seconds, per agent run
+max_concurrent = 2               # reviews running at once; more wait for a free slot
+
+[models]
+followup = "sonnet"              # checks an author's new commits against your review comment
+lessons = "sonnet"               # clusters harvested review comments into proposed lessons
+
+[watcher]
+poll_interval = 120              # seconds; also the launchd StartInterval
+required_approvals = 2
+max_concurrent = 2               # follow-up runs at once
+followup_timeout = 600           # seconds
+max_notifs_per_tick = 6
+bots = ["copilot-pull-request-reviewer", "avettabot"]
+reports_dir = "~/avetta/JoshWorkspace/pr_followups"
+
+[lessons]
+repos = ["processservice", "process-domain", "ui", "workerbridgeservice"]
+days = 90
+out_dir = "~/avetta/JoshWorkspace/review_lessons"
+
+[notify]
+swiftbar_plugin = "prdigest.1h.sh"   # the plugin SwiftBar's alerts are sent as
+alert_sound = "Glass"
+
+[session]
+terminal = "iterm"
