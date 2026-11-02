@@ -38,3 +38,6 @@ alert_sound = "Glass"
 
 [session]
 terminal = "iterm"
+
+[nicknames]                      # GitHub login -> the name notifications use
+# some-login = "Nickname"

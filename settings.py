@@ -55,6 +55,8 @@ DEFAULTS: dict = {
     "session": {
         "terminal": "iterm",
     },
+    # GitHub login -> the name notifications use for that person.
+    "nicknames": {},
 }
 
 
