@@ -54,6 +54,38 @@ class SeverityTests(unittest.TestCase):
         self.assertEqual(review_pr.summary_line(counts), "1 blocking · 1 nit")
 
 
+VERIFIED = SINGLE.replace("SEVERITY: substantive", "") + """
+<details><summary>Verification</summary>
+
+| # | Claim (short) | Verdict | Evidence |
+|---|---|---|---|
+| 1 | Guard misses Count() steps | CONFIRMED | traced |
+| 2 | Deleting breaks a calculation via X | REFUTED — corrected to Y | X passes isActive=true |
+| 3 | 11 rows affected | **UNVERIFIABLE** | no VPN |
+</details>
+
+SEVERITY: substantive
+"""
+
+
+class VerifierStatsTests(unittest.TestCase):
+    def test_not_run(self):
+        self.assertEqual(review_pr.verifier_stats(SINGLE, SINGLE, None), {"ran": False})
+
+    def test_counts_verdicts_and_findings(self):
+        after = VERIFIED.replace("2. 🔵 `src/A.scala:20` — nit: rename x. Reads poorly. *Fix:* call it stepIds.\n", "")
+        stats = review_pr.verifier_stats(SINGLE, after, {"total_cost_usd": 1.234, "duration_ms": 61000})
+        self.assertEqual((stats["confirmed"], stats["refuted"], stats["unverifiable"]), (1, 1, 1))
+        self.assertEqual((stats["findings_before"]["nit"], stats["findings_after"]["nit"]), (1, 0))
+        self.assertTrue(stats["changed_review"])
+        self.assertEqual((stats["cost_usd"], stats["duration_s"]), (1.23, 61))
+
+    def test_all_confirmed_and_unchanged_is_not_a_change(self):
+        text = SINGLE + "\n| 1 | claim | CONFIRMED | e |\n"
+        stats = review_pr.verifier_stats(SINGLE, text, {"total_cost_usd": 0.5})
+        self.assertFalse(stats["changed_review"])
+
+
 class PreambleTests(unittest.TestCase):
     def test_strips_text_before_reviewer_line(self):
         self.assertEqual(review_pr.strip_preamble("I checked it all.\n\n" + SINGLE), SINGLE)

@@ -100,6 +100,32 @@ def split_pr_blocks(text: str) -> list[dict]:
     return blocks
 
 
+VERDICT_ROW_RE = re.compile(r"^\|\s*\d+\s*\|.*\|\s*\**(CONFIRMED|REFUTED|UNVERIFIABLE)\b", re.M)
+
+
+def verifier_stats(reviewer_text: str, final_text: str, envelope: dict | None) -> dict:
+    """What the verifier did on one review, for review/verifier_stats.py.
+
+    Counts the verdict column of its Verification table, and compares the findings
+    the reviewer reported with the findings that survived.
+    """
+    if envelope is None:
+        return {"ran": False}
+    verdicts = {"confirmed": 0, "refuted": 0, "unverifiable": 0}
+    for verdict in VERDICT_ROW_RE.findall(final_text):
+        verdicts[verdict.lower()] += 1
+    before, after = count_findings(reviewer_text), count_findings(final_text)
+    return {
+        "ran": True,
+        **verdicts,
+        "findings_before": before,
+        "findings_after": after,
+        "changed_review": verdicts["refuted"] + verdicts["unverifiable"] > 0 or before != after,
+        "cost_usd": round(envelope.get("total_cost_usd") or 0, 2),
+        "duration_s": int((envelope.get("duration_ms") or 0) / 1000),
+    }
+
+
 def strip_preamble(text: str) -> str:
     """Drop any prose an agent wrote before the review's `Reviewer:` line."""
     m = re.search(r"^Reviewer:", text, re.M)
@@ -282,7 +308,9 @@ def review(target: str, phase_file: Path | None, refresh_plugin: str | None,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "duration_s": int(time.time() - started),
         "cost_usd": round(sum(e.get("total_cost_usd", 0) or 0 for e in (env1, env2) if e), 2),
+        "reviewer_cost_usd": round(env1.get("total_cost_usd") or 0, 2),
         "verified": env2 is not None,
+        "verification": verifier_stats(env1["result"], final, env2),
         "run_dir": str(run_dir),
     }
     return write_drafts(final, meta, settings.path_of(rcfg["drafts_dir"]))
