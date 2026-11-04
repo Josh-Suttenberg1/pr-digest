@@ -136,5 +136,53 @@ class WriteDraftTests(unittest.TestCase):
             self.assertIn("Part of the story review", (drafts / "ABC-1737-processservice.md").read_text())
 
 
+class InSessionReviewerTests(unittest.TestCase):
+    """--reviewer-output: the session wrote the report, so only the verifier runs."""
+
+    def _run(self, report: str, verifier_result: str | None = None):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            report_path = d / "report.md"
+            report_path.write_text("Some preamble.\n\n" + report)
+            cfg = {
+                "claude_cwd": str(d),
+                "review": {
+                    "reviewer_agent": "pr-reviewer", "verifier_agent": "pr-review-verifier",
+                    "timeout": 60, "max_concurrent": 1, "drafts_dir": str(d / "drafts"),
+                },
+            }
+            envelope = {"result": verifier_result, "total_cost_usd": 1.5, "duration_ms": 1000}
+            with mock.patch.object(review_pr, "RUNS_DIR", d / "runs"), \
+                    mock.patch.object(review_pr, "REVIEW_INDEX_DIR", d / "index"), \
+                    mock.patch.object(review_pr, "acquire_slot", return_value=None), \
+                    mock.patch.object(review_pr, "claude_logged_in", return_value=True) as login, \
+                    mock.patch.object(review_pr, "run_agent", return_value=envelope) as run_agent:
+                [rec] = review_pr.review("ABC-1555", None, None, False, cfg, reviewer_output=report_path)
+                draft = Path(rec["draft"]).read_text()
+            return rec, draft, run_agent, login
+
+    def test_substantive_report_runs_only_the_verifier(self):
+        rec, draft, run_agent, _ = self._run(SINGLE, verifier_result=VERIFIED)
+        [call] = run_agent.call_args_list
+        self.assertEqual(call.args[0], "pr-review-verifier")
+        self.assertEqual(rec["reviewer"], "in-session")
+        self.assertIsNone(rec["reviewer_cost_usd"])
+        self.assertTrue(rec["verified"])
+        self.assertIn("Verification", draft)
+
+    def test_nits_only_report_runs_no_agent(self):
+        nits = SINGLE.replace("1. 🔴", "1. 🔵").replace("SEVERITY: substantive", "SEVERITY: nits-only")
+        rec, draft, run_agent, login = self._run(nits)
+        run_agent.assert_not_called()
+        login.assert_not_called()
+        self.assertFalse(rec["verified"])
+        self.assertTrue(draft.startswith("Reviewer:"))
+
+    def test_report_without_pr_header_is_rejected(self):
+        with self.assertRaises(review_pr.ReviewError) as ctx:
+            self._run("Reviewer: pr-reviewer\n\nno header here\n")
+        self.assertEqual(ctx.exception.code, review_pr.EXIT_OUTPUT)
+
+
 if __name__ == "__main__":
     unittest.main()

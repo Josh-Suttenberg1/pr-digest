@@ -1,12 +1,15 @@
 """Run the PR reviewer and its verifier headless, and save the draft(s).
 
     bin/review-pr <ticket key | PR URL | repo#N> [--notify] [--phase-file P]
+                  [--reviewer-output REPORT.md]
 
 This is the one entry point for every review: the menu bar button, /reviews,
 and interactive "review <ticket key>" sessions all call it. Steps:
 
 1. Check that the claude CLI is logged in.
 2. claude -p --agent pr-reviewer, from claude_cwd so the Avetta CLAUDE.md loads.
+   With --reviewer-output, an interactive session already wrote that report by
+   following the agent file, and this step is skipped.
 3. claude -p --agent pr-review-verifier on the reviewer's output, only when it has
    findings beyond nits (anything that could be posted to a coworker).
 4. Write <KEY>-<repo>.md (+ .json sidecar) per PR to the drafts dir, plus
@@ -266,31 +269,52 @@ def write_drafts(final: str, meta: dict, drafts_dir: Path) -> list[dict]:
 
 
 def review(target: str, phase_file: Path | None, refresh_plugin: str | None,
-           skip_verifier: bool, cfg: dict) -> list[dict]:
+           skip_verifier: bool, cfg: dict, reviewer_output: Path | None = None) -> list[dict]:
+    """Run the reviewer (or take its report from reviewer_output), then the verifier.
+
+    reviewer_output is a pr-reviewer report an interactive session wrote by following
+    the agent file itself; the reviewer run is skipped and only the verifier runs.
+    """
     rcfg = cfg["review"]
     cwd = settings.path_of(cfg["claude_cwd"])
     started = time.time()
     run_dir = RUNS_DIR / f"{datetime.now():%Y%m%d-%H%M%S}-{_slug(target)}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    _phase(phase_file, "checking the claude login", refresh_plugin)
-    if claude_logged_in() is False:
-        raise ReviewError("claude CLI is logged out. Run: claude auth login", EXIT_AUTH)
+    reviewer_text = None
+    if reviewer_output is not None:
+        try:
+            reviewer_text = strip_preamble(reviewer_output.read_text())
+        except OSError as e:
+            raise ReviewError(f"cannot read the reviewer output: {e}", EXIT_OUTPUT)
+        if not split_pr_blocks(reviewer_text):
+            raise ReviewError(
+                "reviewer output has no '## <KEY> … avetta/<repo>#<n> … head <sha>' header", EXIT_OUTPUT,
+            )
+
+    needs_claude = reviewer_text is None or (not skip_verifier and severity_of(reviewer_text) == "substantive")
+    if needs_claude:
+        _phase(phase_file, "checking the claude login", refresh_plugin)
+        if claude_logged_in() is False:
+            raise ReviewError("claude CLI is logged out. Run: claude auth login", EXIT_AUTH)
 
     slot = acquire_slot(rcfg["max_concurrent"], phase_file, refresh_plugin)  # held until exit
     started = time.time()
 
-    _phase(phase_file, f"{rcfg['reviewer_agent']} is reviewing", refresh_plugin)
-    env1 = run_agent(
-        rcfg["reviewer_agent"], f"Review {target}.", cwd, rcfg["timeout"], run_dir / "reviewer.stderr",
-    )
+    env1 = None
+    if reviewer_text is None:
+        _phase(phase_file, f"{rcfg['reviewer_agent']} is reviewing", refresh_plugin)
+        env1 = run_agent(
+            rcfg["reviewer_agent"], f"Review {target}.", cwd, rcfg["timeout"], run_dir / "reviewer.stderr",
+        )
+        reviewer_text = env1["result"]
     reviewer_out = run_dir / "reviewer.md"
-    reviewer_out.write_text(env1["result"])
+    reviewer_out.write_text(reviewer_text)
 
     # The verifier exists to stop wrong findings reaching a coworker. A clean or
     # nits-only review has nothing worth refuting, so it skips the second run.
-    final, env2 = env1["result"], None
-    if not skip_verifier and severity_of(env1["result"]) == "substantive":
+    final, env2 = reviewer_text, None
+    if not skip_verifier and severity_of(reviewer_text) == "substantive":
         _phase(phase_file, f"{rcfg['verifier_agent']} is checking the findings", refresh_plugin)
         env2 = run_agent(
             rcfg["verifier_agent"], f"Verify the review at {reviewer_out}.", cwd,
@@ -308,9 +332,10 @@ def review(target: str, phase_file: Path | None, refresh_plugin: str | None,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "duration_s": int(time.time() - started),
         "cost_usd": round(sum(e.get("total_cost_usd", 0) or 0 for e in (env1, env2) if e), 2),
-        "reviewer_cost_usd": round(env1.get("total_cost_usd") or 0, 2),
+        "reviewer_cost_usd": round(env1.get("total_cost_usd") or 0, 2) if env1 else None,
+        "reviewer": "headless" if env1 else "in-session",
         "verified": env2 is not None,
-        "verification": verifier_stats(env1["result"], final, env2),
+        "verification": verifier_stats(reviewer_text, final, env2),
         "run_dir": str(run_dir),
     }
     return write_drafts(final, meta, settings.path_of(rcfg["drafts_dir"]))
@@ -348,11 +373,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--phase-file", type=Path, help="write live progress here (menu bar)")
     parser.add_argument("--refresh-plugin", help="SwiftBar plugin to refresh on each phase")
     parser.add_argument("--skip-verifier", action="store_true", help="debugging only")
+    parser.add_argument(
+        "--reviewer-output", type=Path,
+        help="a pr-reviewer report written in an interactive session; skips the reviewer run",
+    )
     args = parser.parse_args(argv)
 
     cfg = settings.load()
     try:
-        records = review(args.target, args.phase_file, args.refresh_plugin, args.skip_verifier, cfg)
+        records = review(args.target, args.phase_file, args.refresh_plugin, args.skip_verifier, cfg,
+                         reviewer_output=args.reviewer_output)
     except ReviewError as e:
         print(str(e), file=sys.stderr)
         if args.notify:
