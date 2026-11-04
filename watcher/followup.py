@@ -5,6 +5,11 @@ from (thread id, Josh's comment id), so the same response never queues twice.
 
   queued  -> running (detached `python -m watcher followup-run <job>`) -> ready | failed
   ready   -> posted (Josh clicked "Post this reply") | dismissed
+  queued, ready or failed -> cleared, when Josh answers the thread himself: he replies
+          in it, resolves it, or submits a new review (`cleared_jobs`, run each tick)
+
+A finished run doesn't pop up a notification: the watcher already sent the PR's one
+notification when the response arrived, and the menu row updates with the verdict.
 
 The run collects only the commits since Josh's comment, asks claude (models.followup)
 for a verdict and a drafted reply, and writes the report itself. claude gets read-only
@@ -115,9 +120,46 @@ def enqueue(event: dict) -> str | None:
         **{k: event[k] for k in ("trigger", "actor", "thread_id", "root_id", "arm_id",
                                  "arm_commit", "head", "path", "line", "my_comment",
                                  "my_comment_url", "thread", "url")},
+        "blocking": bool(event.get("blocking")),
         "pr": event["pr"],
     })
     return jid
+
+
+CLEARABLE = ("queued", "ready", "failed")
+
+
+def cleared_jobs(pr: dict, jobs: list[dict], me: str) -> list[tuple[str, str]]:
+    """(job id, why) for each of the PR's open jobs that Josh has answered himself since
+    the response: he replied in the thread or resolved it, or submitted a review that
+    approves, requests changes, or has a body after the job was queued. Pure; `pr` is a
+    watcher snapshot (watcher/gh.py normalize_pr). A running job is left for the next
+    tick, so its run doesn't overwrite the status."""
+    threads = {t["id"]: t for t in pr["threads"]}
+    out = []
+    for job in jobs:
+        if job.get("status") not in CLEARABLE or (job.get("pr") or {}).get("id") != pr["id"]:
+            continue
+        since = job.get("created_at") or ""
+        reviewed = any(r["author"] == me and (r.get("submitted_at") or "") > since
+                       and (r["state"] in ("APPROVED", "CHANGES_REQUESTED")
+                            or (r["state"] == "COMMENTED" and (r.get("body") or "").strip()))
+                       for r in pr["reviews"])
+        t = threads.get(job.get("thread_id"))
+        if reviewed:
+            out.append((job["id"], "you submitted a new review"))
+        elif t and t["resolved"]:
+            out.append((job["id"], "the thread is resolved"))
+        elif t and any(c["author"] == me and c["id"] > job.get("arm_id", 0)
+                       for c in t["comments"]):
+            out.append((job["id"], "you replied in the thread"))
+    return out
+
+
+def clear(jid: str, why: str) -> None:
+    job = load_job(jid)
+    job.update(status="cleared", cleared=why)
+    save_job(job)
 
 
 def _alive(pid: int | None) -> bool:
@@ -393,11 +435,6 @@ def run(jid: str, cfg: dict | None = None) -> int:
             return 0
         job["reapproval"] = "posting the approval failed; decide yourself"
     save_job(job)
-    shown = render.render({"type": "verdict", "verdict": result["verdict"], "actor": job["actor"],
-                           "pr": pr, "url": Path(job["report"]).as_uri()},
-                          cfg.get("nicknames", {}))
-    notify.alert(shown["title"], shown["subtitle"], shown["body"], href=shown["href"],
-                 plugin=cfg["notify"]["swiftbar_plugin"], sound=cfg["notify"]["alert_sound"])
     return 0
 
 

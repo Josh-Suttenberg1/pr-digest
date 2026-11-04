@@ -22,7 +22,8 @@ def legacy(num, sources=("Review requested",), author="dev", draft=False, repo="
 def mine_row(num, waiting, draft=False):
     return {"url": f"https://github.com/acme/web/pull/{num}", "title": f"Mine {num}",
             "repo": "web", "number": num, "isDraft": draft, "waiting": waiting,
-            "blockers": [], "threads_waiting": [], "unanswered_comments": []}
+            "blockers": [], "threads_waiting": [], "unanswered_comments": [],
+            "approvals": [], "requested": [], "answered_change_requests": []}
 
 
 class BuildSectionsTest(unittest.TestCase):
@@ -34,44 +35,54 @@ class BuildSectionsTest(unittest.TestCase):
         return {**base, **kw}
 
     def test_parked_reviews_are_not_owed_and_not_counted(self):
-        parked = st(2, tier=menu.PARKED_TIER, tags=["CI failing: build", "waiting 3d"])
-        s = menu.build_sections(self.data(reviews={"needs_you": [st(1), parked]}), [])
-        self.assertEqual([x["pr_url"] for x in s["owed"]], [st(1)["pr_url"]])
+        parked = st(2, tier=menu.PARKED_TIER, tags=["CI failing: build", "waiting 3d"],
+                    bucket="needs_you")
+        s = menu.build_sections(self.data(reviews={"needs_you": [st(1, bucket="needs_you"),
+                                                                 parked]}), [])
+        self.assertEqual([e["url"] for e in s["owed"]], [st(1)["pr_url"]])
         self.assertEqual(s["count"], 1)
         reasons = [r for r, _ in s["other"]]
         self.assertEqual(reasons, ["parked — CI failing: build"])
 
-    def test_count_is_actionable_followup_prs_plus_my_waiting_prs_plus_owed(self):
+    def test_followups_are_one_row_per_pr_and_only_open_jobs_count(self):
         def job(pr_id, status, at="2026-01-01T00:00:00Z"):
-            return {"status": status, "pr": {"id": pr_id}, "created_at": at}
-        jobs = [job("A", "ready"), job("A", "ready", "2026-01-03T00:00:00Z"),
-                job("B", "running"), job("C", "failed"), job("D", "posted")]
-        data = self.data(reviews={"needs_you": [st(1)]},
-                         mine=[mine_row(5, True), mine_row(6, False)])
+            return {"id": f"{pr_id}{status}{at}", "status": status, "created_at": at,
+                    "trigger": "reply", "actor": "dev", "my_comment": "x",
+                    "pr": {"id": pr_id, "url": f"https://github.com/acme/api/pull/{pr_id}",
+                           "title": f"ABC-{pr_id}: thing", "author": "dev"}}
+        jobs = [job(1, "ready"), job(1, "ready", "2026-01-03T00:00:00Z"),
+                job(2, "running"), job(3, "failed"), job(4, "posted")]
+        data = self.data(mine=[mine_row(5, True), mine_row(6, False)])
         s = menu.build_sections(data, jobs)
-        groups = s["followups"]
-        self.assertEqual([g["pr"]["id"] for g in groups], ["A", "B", "C"])  # one row per PR
-        self.assertEqual(groups[0]["acted_at"], "2026-01-03T00:00:00Z")      # newest move
-        self.assertEqual(s["count"], 2 + 1 + 1)   # A and C; B is still running
+        urls = [e["url"] for e in s["followups"]]
+        self.assertEqual(sorted(urls), [f"https://github.com/acme/api/pull/{n}" for n in (1, 2, 3)])
+        one = next(e for e in s["followups"] if e["url"].endswith("/1"))
+        self.assertEqual(len(one["jobs"]), 2)
+        self.assertEqual(one["waiting_since"], "2026-01-01T00:00:00Z")   # the longest wait
+        self.assertEqual(s["count"], 3 + 1)      # three yellow follow-ups, one red PR of mine
+        self.assertEqual(s["title"], "🔴1 🟡3")
 
-    def test_dismissed_pr_of_mine_hides_until_new_activity(self):
+    def test_dismissed_pr_of_mine_loses_its_dot_until_new_activity(self):
         row = mine_row(5, True)
         row["blockers"] = [{"author": "dev", "at": "2026-01-02T00:00:00Z"}]
         data = self.data(mine=[row])
         hidden = menu.build_sections(data, [], {row["url"]: "2026-01-02T00:00:00Z"})
         [listed] = hidden["mine"]                  # still listed under Your PRs ...
         self.assertTrue(listed["dismissed"])
-        self.assertEqual(listed["state"], "changes")
+        self.assertIsNone(listed["color"])
         self.assertEqual(hidden["count"], 0)       # ... but no longer counted
-        row["threads_waiting"] = [{"last_author": "dev", "last_at": "2026-01-05T00:00:00Z"}]
+        self.assertEqual(hidden["title"], "✓")
+        row["threads_waiting"] = [{"last_author": "dev", "author": "dev", "kind": "nit",
+                                   "last_at": "2026-01-05T00:00:00Z"}]
         back = menu.build_sections(data, [], {row["url"]: "2026-01-02T00:00:00Z"})
-        self.assertEqual(back["mine"][0]["state"], "move")
+        self.assertEqual(back["mine"][0]["color"], "red")
         self.assertEqual(back["count"], 1)
 
     def test_every_search_hit_lands_somewhere_with_a_reason(self):
         data = self.data(
-            reviews={"well_approved": [st(1, reason="2 approvals, no change requests")],
-                     "author": [st(2, reason="you commented; no new commits")]},
+            reviews={"well_approved": [st(1, reason="2 approvals, no change requests",
+                                          bucket="well_approved")],
+                     "author": [st(2, reason="you commented; no new commits", bucket="author")]},
             mine=[mine_row(9, False, draft=True)],
             legacy=[legacy(1), legacy(2), legacy(3, draft=True),
                     legacy(4, sources=("Assigned to you",)),
@@ -98,6 +109,7 @@ class BuildSectionsTest(unittest.TestCase):
         s = menu.build_sections(data, [])
         self.assertEqual(s["other"], [])
         self.assertEqual(s["count"], 1)
+        self.assertEqual(s["mine"][0]["color"], "red")
 
 
 def gql_comment(login, at, typename="User", body="x"):
@@ -171,8 +183,10 @@ class StatusReportTest(unittest.TestCase):
         mine_clear["answered_change_requests"] = [
             {"author": "rev", "at": "2026-01-02T00:00:00Z", "url": "r/1",
              "rerequested_at": "2026-01-03T00:00:00Z"}]
-        data = {"me": ME, "reviews": {"needs_you": [st(1)], "author": [], "unreadable": [],
-                                      "well_approved": [st(2, reason="2 approvals")],
+        data = {"me": ME, "reviews": {"needs_you": [st(1, bucket="needs_you")], "author": [],
+                                      "unreadable": [],
+                                      "well_approved": [st(2, reason="2 approvals",
+                                                           bucket="well_approved")],
                                       "done": []},
                 "mine": [mine_clear], "legacy": []}
         sections = menu.build_sections(data, [])
@@ -186,6 +200,7 @@ class StatusReportTest(unittest.TestCase):
             self.assertIn("re-requested them at", web)
             self.assertIn("waiting on their re-review", web)
             self.assertIn("**Menu section:** Reviews you owe", (d / "api#1.md").read_text())
+            self.assertIn("**Priority:** 🟢 green (new)", (d / "api#1.md").read_text())
             self.assertIn("[api#2](api#2.md)", (d / "index.md").read_text())
 
 

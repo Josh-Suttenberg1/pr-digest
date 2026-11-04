@@ -1,22 +1,20 @@
 """Turn watcher events into notification text. Pure.
 
-Title says who did what, subtitle names the PR (ticket key + short title), body says
-what's left for you. Approvals, change requests and follow-up verdicts are alerts
-(they stay until dismissed); comments and replies are banners.
+A PR gets one notification per tick, at its priority color (triage/priority.py):
 
-On your own PRs an approval's title carries its place in line ("✅ Woods approved
-your PR · 2/2"), and the body counts the comments to answer by kind ("8 comments to
-answer: 3 suggestions, 5 nits") and names any change request still open, so an
-approval never reads as done while one stands. When a notification leaves you
-something to answer, clicking it opens a Claude session on the PR's comments
-(session.respond_url); otherwise it opens the review on GitHub.
+  title     the dot, the ticket and the PR's reason, e.g.
+            "🔴 ABC-123 · Mykal answered 2 of your comments, 1 blocking"
+  subtitle  the PR title without its ticket key
+  body      what happened this tick, in words ("Woods: Rename `t` to `total`")
+
+Clicking one of your PRs' notifications opens a Claude session on its comments
+(session.respond_url); a follow-up's opens the comment that was answered. Watcher
+health notices (can't reach GitHub, claude logged out) keep their own plain banners.
 """
 
 from __future__ import annotations
 
 import re
-
-from triage import comment_kind
 
 TICKET_RE = re.compile(r"\b(?:CONN|WS)-\d+\b")
 TITLE_MAX = 40
@@ -36,75 +34,61 @@ def subtitle(pr: dict) -> str:
     return f"{key} · {rest}" if rest else key
 
 
-def _plural(n: int, word: str) -> str:
-    return f"{n} {word}{'' if n == 1 else 's'}"
-
-
-def _answer_phrase(event: dict) -> str:
-    """'8 comments to answer: 3 suggestions, 5 nits'; '' when there are none."""
-    n = event.get("count") or 0
-    if not n:
-        return ""
-    kinds = event.get("kinds") or []
-    detail = comment_kind.phrase(kinds) if set(kinds) - {"comment"} else ""
-    return f"{_plural(n, 'comment')} to answer" + (f": {detail}" if detail else "")
-
-
-def _still_open(event: dict, nicknames: dict[str, str]) -> str:
-    """"Mykal's change request is still open"; '' when none is."""
-    names = [who(a, nicknames) for a in event.get("changes_requested_by") or []]
-    if not names:
-        return ""
-    if len(names) == 1:
-        return f"{names[0]}'s change request is still open"
-    return f"{', '.join(names[:-1])} and {names[-1]}'s change requests are still open"
-
-
 def _respond(pr: dict) -> str:
     import session
     return session.respond_url(pr["url"])
 
 
-def render(event: dict, nicknames: dict[str, str], required_approvals: int = 2) -> dict:
-    """{"style": alert|banner, "title", "subtitle", "body", "href", "group"}."""
-    if event["type"] == "notice":
-        return {"style": event.get("style", "banner"), "title": event["title"],
-                "subtitle": event.get("subtitle", ""), "body": event.get("body", " "),
-                "href": event.get("url"), "group": "pr-digest-watcher"}
+def _event_line(event: dict, nicknames: dict[str, str]) -> str:
+    """One event in words; '' for one that adds nothing (a bare approval)."""
     name = who(event.get("actor") or "", nicknames)
-    pr = event["pr"]
-    out = {"subtitle": subtitle(pr), "href": event.get("url") or pr["url"],
-           "group": f"pr-{pr['repo']}-{pr['number']}-{event.get('actor')}"}
     kind = event["type"]
-    if kind == "decision" and event["state"] == "APPROVED":
-        answer = _answer_phrase(event)
-        body = " · ".join(x for x in (answer or "No comments", _still_open(event, nicknames)) if x)
-        return {**out, "style": "alert",
-                "title": f"✅ {name} approved your PR · {event['approvals']}/{required_approvals}",
-                "body": body, "href": _respond(pr) if answer else out["href"]}
-    if kind == "decision":
-        answer = _answer_phrase(event)
-        body = answer or event["first_line"] or "See the review"
-        return {**out, "style": "alert", "title": f"✏️ {name} requested changes",
-                "body": body, "href": _respond(pr)}
-    if kind == "comments":
-        title = (f"💬 {name} commented" if event["count"] <= 1
-                 else f"💬 {name} left {event['count']} comments")
-        kinds = comment_kind.phrase(event.get("kinds") or [])
-        lead = f"{kinds} — " if event["count"] > 1 and kinds else ""
-        return {**out, "style": "banner", "title": title,
-                "body": f"{lead}{event['first_line']}".strip() or " ", "href": _respond(pr)}
+    from triage import comment_kind
+    line = comment_kind.summary(event.get("first_line") or "", 120)
+    if kind == "decision" and event["state"] == "CHANGES_REQUESTED":
+        return f"{name} requested changes" + (f": {line}" if line else "")
+    if kind in ("decision", "comments"):
+        return f"{name}: {line}" if line and event.get("count") else ""
     if kind == "thread":
         if event["trigger"] == "reply":
-            title = f"↩️ {name} replied to your comment"
-            body = event["first_line"] or " "
-        else:
-            title = f"🔧 {name} changed the code under your comment"
-            body = f"{event['path']}" + (f":{event['line']}" if event.get("line") else "")
-        return {**out, "style": "banner", "title": title, "body": body}
-    if kind == "verdict":
-        verdict = {"addressed": "addressed your comment", "partly": "partly addressed your comment",
-                   "not_addressed": "didn't address your comment"}.get(event["verdict"], event["verdict"])
-        return {**out, "style": "alert", "title": f"🔎 {name} {verdict}",
-                "body": "Reply drafted — review it in the menu bar"}
-    raise ValueError(f"unknown event type {kind}")
+            return f"{name} replied: {line}" if line else f"{name} replied"
+        where = event.get("path") or "the file"
+        return f"the code changed under your comment on {where}"
+    if kind == "rerequest":
+        return f"{name} re-requested your review"
+    return ""
+
+
+def render_pr(pr: dict, color: str, reason: str, events: list[dict],
+              nicknames: dict[str, str], mine: bool) -> dict:
+    """The one notification for a PR this tick: {style, color, title, subtitle, body,
+    href, group}."""
+    from triage import priority
+    key = priority.ticket(pr["title"], pr["url"])
+    rest = priority.TICKET_RE.sub("", pr["title"]).strip(" []:·-")
+    if len(rest) > TITLE_MAX * 2:
+        rest = rest[:TITLE_MAX * 2 - 1] + "…"
+    lines = [x for x in (_event_line(e, nicknames) for e in events) if x]
+    body = " · ".join(dict.fromkeys(lines))
+    if len(body) > 200:
+        body = body[:199] + "…"
+    if mine:
+        href = _respond(pr)
+    else:
+        threads = sorted((e for e in events if e["type"] == "thread"),
+                         key=lambda e: not e.get("blocking"))
+        href = (threads[0].get("url") if threads else None) or pr["url"]
+    return {"style": "alert", "color": color,
+            "title": f"{priority.dot(color)} {key} · {reason}",
+            "subtitle": rest or key, "body": body or " ", "href": href,
+            "group": f"pr-{pr['repo']}-{pr['number']}"}
+
+
+def render(event: dict, nicknames: dict[str, str], required_approvals: int = 2) -> dict:
+    """A watcher notice (type "notice"): {"style", "title", "subtitle", "body", "href",
+    "group"}."""
+    if event["type"] != "notice":
+        raise ValueError(f"PR events go through render_pr, not {event['type']}")
+    return {"style": event.get("style", "banner"), "title": event["title"],
+            "subtitle": event.get("subtitle", ""), "body": event.get("body", " "),
+            "href": event.get("url"), "group": "pr-digest-watcher"}

@@ -62,6 +62,9 @@ POD: set[str] = set()
 CI_IGNORED: tuple[str, ...] = ()
 # GitHub login -> the name shown for that person.
 NICKNAMES: dict[str, str] = {}
+# Logins that never count as a person engaging with a PR (lower-case). GitHub Apps and
+# `[bot]` logins are recognized on their own.
+BOTS: set[str] = set()
 # Days of waiting that still raise a PR's rank; past this, age stops counting.
 MAX_WAIT_DAYS = 6
 # A diff at or under this many changed lines is a quick review and ranks a bit higher.
@@ -78,7 +81,7 @@ _FETCH_LOCKS_GUARD = threading.Lock()
 
 def configure(cfg: dict | None = None) -> None:
     """Set the module's knobs from a settings dict (default: settings.load())."""
-    global ORG, REPOS_ROOT, WELL_APPROVED, POD, CI_IGNORED, NICKNAMES
+    global ORG, REPOS_ROOT, WELL_APPROVED, POD, CI_IGNORED, NICKNAMES, BOTS
     cfg = cfg if cfg is not None else settings.load()
     ORG = cfg.get("org") or ORG
     REPOS_ROOT = settings.path_of(cfg.get("repos_root") or str(REPOS_ROOT))
@@ -87,6 +90,7 @@ def configure(cfg: dict | None = None) -> None:
     POD = set(tri.get("pod") or [])
     CI_IGNORED = tuple(s.lower() for s in tri.get("ci_ignored") or [])
     NICKNAMES = dict(cfg.get("nicknames") or {})
+    BOTS = {b.lower() for b in (cfg.get("watcher") or {}).get("bots") or []}
 
 
 configure()
@@ -326,6 +330,8 @@ def _review_state(url: str, pr: dict, me: str, teams: list[str]) -> dict | None:
                          (review.get("commit_id") or "").lower())
         if state in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
             decisions[user] = (state, (review.get("commit_id") or "").lower())
+    reviewers = sorted({(r.get("user") or {}).get("login", "") for r in reviews
+                        if not _is_bot_user(r.get("user"))} - {"", author, me})
     requested_direct = any((u or {}).get("login") == me
                            for u in pull.get("requested_reviewers") or [])
     requested = requested_direct or any((t or {}).get("slug") in teams
@@ -348,6 +354,7 @@ def _review_state(url: str, pr: dict, me: str, teams: list[str]) -> dict | None:
         "mine": decisions.get(me),
         "commented": commented,
         "my_review": my_review,
+        "reviewers": reviewers,
         "author_reviews": [r for r in reviews
                            if (r.get("user") or {}).get("login") == author],
         "me": me,
@@ -355,6 +362,42 @@ def _review_state(url: str, pr: dict, me: str, teams: list[str]) -> dict | None:
         "requested": requested,
         "requested_direct": requested_direct,
     }
+
+
+def _is_bot_user(user: dict | None) -> bool:
+    """A REST `user` that is a GitHub App, a `[bot]` login, or a configured bot."""
+    login = ((user or {}).get("login") or "").lower()
+    return (not login or (user or {}).get("type") == "Bot" or login.endswith("[bot]")
+            or login in BOTS)
+
+
+def _issue_comments(st: dict) -> list[dict]:
+    """The PR's top-level comments, fetched once and kept on `st`."""
+    if "issue_comments" not in st:
+        issue = _gh_json(["gh", "api", "--paginate",
+                          f"repos/{st['owner_repo']}/issues/{st['pr_number']}/comments"])
+        st["issue_comments"] = issue if isinstance(issue, list) else []
+    return st["issue_comments"]
+
+
+def _engaged(st: dict) -> list[str]:
+    """Everyone other than you, the author and bots who has reviewed the PR (any
+    review, so inline comments count) or left a top-level comment on it."""
+    people = set(st.get("reviewers") or [])
+    people |= {(c.get("user") or {}).get("login", "") for c in _issue_comments(st)
+               if not _is_bot_user(c.get("user"))}
+    return sorted(people - {"", st["author"], st["me"]})
+
+
+def _rerequested_at(st: dict, since: str) -> str:
+    """When your review was first requested again after `since` (directly or via one
+    of your teams), while that request is still pending; '' otherwise."""
+    if not since or not st["requested"]:
+        return ""
+    stamps = [ev.get("created_at") or "" for ev in _timeline(st)
+              if ev.get("event") == "review_requested" and _requests_me(st, ev)
+              and _is_after(ev.get("created_at"), since)]
+    return min(stamps, default="")
 
 
 def _my_last_touch(st: dict) -> tuple[str, str]:
@@ -365,10 +408,7 @@ def _my_last_touch(st: dict) -> tuple[str, str]:
     the sha is the PR's last commit at that moment (from `pulls/<n>/commits`); the
     sha is empty when that can't be worked out."""
     when, sha = st["my_review"]
-    issue = _gh_json(["gh", "api", "--paginate",
-                      f"repos/{st['owner_repo']}/issues/{st['pr_number']}/comments"]) or []
-    st["issue_comments"] = issue if isinstance(issue, list) else []
-    mine = [c.get("created_at") or "" for c in st["issue_comments"]
+    mine = [c.get("created_at") or "" for c in _issue_comments(st)
             if (c.get("user") or {}).get("login") == st["me"]]
     latest = max(mine, default="")
     if latest and (not when or _is_after(latest, when)):
@@ -404,10 +444,8 @@ def _author_moved_since(st: dict, since: str) -> str | None:
                 and (c.get("in_reply_to_id") or c.get("id")) in my_threads
                 and _is_after(c.get("created_at"), since)):
             return "the author replied on your thread"
-    if "issue_comments" not in st:
-        _my_last_touch(st)
     if any((c.get("user") or {}).get("login") == author
-           and _is_after(c.get("created_at"), since) for c in st["issue_comments"]):
+           and _is_after(c.get("created_at"), since) for c in _issue_comments(st)):
         return "the author commented on the PR"
     if any((r.get("body") or "").strip() and _is_after(r.get("submitted_at"), since)
            for r in st["author_reviews"]):
@@ -620,7 +658,8 @@ def _rank(st: dict) -> None:
     if st["lines_changed"] <= QUICK_LINES:
         score += 1
         tags.append("quick")
-    waited = _days_since(_waiting_since(st))
+    st["waiting_since"] = _waiting_since(st)
+    waited = _days_since(st["waiting_since"])
     score += min(waited, MAX_WAIT_DAYS) / 2
     tags.append(f"waiting {int(waited)}d" if waited >= 1 else "waiting <1d")
     st["tier"] = TIER_PARKED if parked else (
@@ -653,6 +692,11 @@ def _triage_one(url: str, pr: dict, me: str, teams: list[str],
     st["draft_path"], st["freshness"] = draft_freshness(url, st["head_sha"], drafts)
     if st["bucket"] == "needs_you":
         _rank(st)
+        st["engaged"] = _engaged(st)
+    # A pending re-request of a PR you already reviewed or commented on puts it at the
+    # top of your follow-ups (triage/priority.py), whatever the bucket.
+    st["rerequested_at"] = (_rerequested_at(st, _my_last_touch(st)[0])
+                            if _is_rereview(st) and st["requested"] else "")
     return st
 
 

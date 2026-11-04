@@ -50,6 +50,9 @@ query($ids: [ID!]!) {
       databaseId state submittedAt body url author { login __typename } } }
     comments(last: 100) { nodes {
       databaseId createdAt body url author { login __typename } } }
+    timelineItems(last: 30, itemTypes: [REVIEW_REQUESTED_EVENT]) { nodes {
+      ... on ReviewRequestedEvent { id createdAt
+        actor { login } requestedReviewer { ... on User { login } } } } }
     reviewThreads(first: 100) {
       pageInfo { hasNextPage endCursor }
       nodes { id isResolved isOutdated path line originalLine resolvedBy { login }
@@ -121,6 +124,7 @@ def _comment(node: dict, bots: set[str]) -> dict:
         "commit": (node.get("commit") or {}).get("oid"),
         "original_commit": (node.get("originalCommit") or {}).get("oid"),
         "review_id": (node.get("pullRequestReview") or {}).get("databaseId"),
+        "review_state": (node.get("pullRequestReview") or {}).get("state"),
     }
 
 
@@ -165,6 +169,13 @@ def normalize_pr(node: dict, kind: str, bots: set[str], extra_threads: list[dict
         "reviews": reviews,
         "issue_comments": [_comment(c, bots) for c in (node.get("comments") or {}).get("nodes") or []],
         "threads": threads,
+        # Direct review requests (team requests carry no login), oldest first.
+        "review_requests": [
+            {"id": n["id"], "at": n.get("createdAt"),
+             "by": (n.get("actor") or {}).get("login", ""),
+             "reviewer": (n.get("requestedReviewer") or {}).get("login", "")}
+            for n in (node.get("timelineItems") or {}).get("nodes") or []
+            if n and n.get("id") and (n.get("requestedReviewer") or {}).get("login")],
     }
 
 

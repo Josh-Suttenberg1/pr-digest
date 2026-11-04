@@ -22,6 +22,9 @@ WATCHER_DIR = settings.STATE_DIR / "watcher"
 STATE_PATH = WATCHER_DIR / "state.json"
 LOCK_PATH = WATCHER_DIR / "lock"
 JOBS_DIR = WATCHER_DIR / "jobs"
+# PR url -> when Josh dismissed its menu row (ISO). Written by the menu; the tick reads
+# it so the next response after a dismissal notifies afresh.
+CLEARED_PATH = WATCHER_DIR / "cleared.json"
 
 EMPTY = {"version": 1, "seeded_at": None, "last_ok_at": None, "last_sweep_at": None,
          "backoff": {"fails": 0, "next_at": 0, "alerted": False},
@@ -53,6 +56,23 @@ def lock():
         f.close()
         return None
     return f
+
+
+def load_cleared(path: Path = CLEARED_PATH) -> dict[str, str]:
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def mark_cleared(url: str, when: str, path: Path = CLEARED_PATH) -> None:
+    data = load_cleared(path)
+    data[url] = when
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
+    os.replace(tmp, path)
 
 
 # Back-off after GitHub failures: 2, 4, 8, then every 30 minutes.

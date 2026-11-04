@@ -60,6 +60,16 @@ DEFAULTS: dict = {
     "notify": {
         "swiftbar_plugin": "prdigest.1h.sh",
         "alert_sound": "Glass",
+        # Played with afplay for a PR's notification, by its priority color.
+        "red_sound": "/System/Library/Sounds/Glass.aiff",
+        "yellow_sound": "/System/Library/Sounds/Tink.aiff",
+    },
+    # triage/priority.py: a review you owe turns yellow once it has waited more than
+    # stale_after_days with fewer than watcher.required_approvals approvals and at most
+    # max_engaged_for_stale people (besides the author and bots) engaged.
+    "priority": {
+        "stale_after_days": 2,
+        "max_engaged_for_stale": 1,
     },
     "session": {
         "terminal": "iterm",

@@ -107,7 +107,7 @@ class ApprovalsTest(unittest.TestCase):
 
 def mine_row(num, *, waiting=False, approvals=0, blockers=(), answered=(), threads=(),
              updated="2026-11-01T00:00:00Z", draft=False):
-    return {"url": f"https://github.com/avetta/ui/pull/{num}", "title": f"[WS-{num}] thing {num}",
+    return {"url": f"https://github.com/avetta/ui/pull/{num}", "title": f"[ABC-{num}] thing {num}",
             "repo": "ui", "number": num, "isDraft": draft, "waiting": waiting,
             "updated_at": updated, "unanswered_comments": [], "requested": [],
             "blockers": list(blockers), "answered_change_requests": list(answered),
@@ -127,44 +127,50 @@ class YourPrsSectionTest(unittest.TestCase):
     def data(self, rows):
         return {"me": ME, "reviews": {}, "mine": rows, "legacy": []}
 
-    def test_your_move_first_then_change_requests_then_waiting_then_approved(self):
+    def test_red_first_then_no_dot_and_drafts_collapse(self):
         cr = {"author": "mthomas46", "at": "2026-10-30T06:16:00Z", "url": "",
               "rerequested_at": "2026-10-30T22:40:00Z"}
-        rows = [mine_row(1, approvals=2), mine_row(2), mine_row(3, answered=[cr]),
+        rows = [mine_row(1, approvals=2, updated="2026-11-03T00:00:00Z"), mine_row(2),
+                mine_row(3, answered=[cr]),
                 mine_row(4, waiting=True, threads=[woods_thread("nit", "x")]),
                 mine_row(5, draft=True)]
         s = menu.build_sections(self.data(rows), [])
-        self.assertEqual([(r["number"], r["state"]) for r in s["mine"]],
-                         [(4, "move"), (3, "changes"), (2, "waiting"), (1, "approved")])
-        self.assertEqual([r["number"] for r in s["mine_drafts"]], [5])
+        self.assertEqual([(e["row"]["number"], e["color"]) for e in s["mine"]],
+                         [(4, "red"), (1, None), (2, None), (3, None)])
+        self.assertEqual([e["row"]["number"] for e in s["mine_drafts"]], [5])
         self.assertEqual(s["count"], 1)
 
-    def test_status_line_reads_like_the_pr(self):
+    def test_row_reads_ticket_then_what_happened_then_title(self):
         cr = {"author": "mthomas46", "at": "2026-10-30T03:50:00Z", "url": "",
               "rerequested_at": "2026-10-30T23:15:00Z"}
         row = mine_row(9168, waiting=True, approvals=2, answered=[cr], threads=[
             woods_thread("suggestion", "add a test"), woods_thread("nit", "rename"),
             woods_thread("nit", "move the mock")])
-        line = menu.mine_status_line(row, {"mthomas46": "Mykal"}, 2)
-        self.assertEqual(line, "💬 3 to answer (1 suggestion, 2 nits) · ✅ 2/2 approved · "
-                               "✏️ Mykal requested changes, re-requested")
+        [e] = menu.build_sections(self.data([row]), [], nick={"plaxdan": "Woods"})["mine"]
+        self.assertEqual(menu.row_text(e),
+                         "🔴 ABC-9168 · Woods left 3 comments (1 suggestion, 2 nits) · thing 9168")
+        self.assertEqual(e["why"], "Why it's red: 3 comments from Woods are unanswered")
+        waiting = mine_row(1, answered=[cr], approvals=1)
+        [w] = menu.build_sections(self.data([waiting]), [], nick={"mthomas46": "Mykal"})["mine"]
+        self.assertEqual(menu.row_text(w), "ABC-1 · Waiting on Mykal to re-review · thing 1")
 
     def test_submenu_belongs_to_the_row_not_its_dismiss_alternate(self):
         row = mine_row(9168, waiting=True, approvals=2,
                        threads=[woods_thread("suggestion", "add a test")])
-        s = menu.build_sections(self.data([row]), [])
+        s = menu.build_sections(self.data([row]), [], nick={"plaxdan": "Woods"})
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             menu.mine_block(s["mine"][0], {"plaxdan": "Woods"}, 2)
         lines = out.getvalue().splitlines()
-        self.assertTrue(lines[0].startswith("💬 WS-9168 · ui#9168"))
+        self.assertTrue(lines[0].startswith("🔴 ABC-9168 · Woods left 1 comment (1 suggestion)"))
         dismiss = next(i for i, x in enumerate(lines) if "alternate=true" in x)
         last_child = max(i for i, x in enumerate(lines) if x.startswith("--"))
         self.assertGreater(dismiss, last_child)
-        self.assertTrue(any(x.startswith("--✅ a2 approved · 2/2") for x in lines))
-        self.assertTrue(any(x.startswith("--💡 Suggestion · Woods · Types.elm — add a test")
+        self.assertTrue(any(x.startswith("--Approvals: 2 of 2 (a1 ") for x in lines))
+        self.assertTrue(any(x.startswith("--Suggestion · Woods · Types.elm — add a test")
                             for x in lines))
         self.assertTrue(any("Go through these with Claude" in x for x in lines))
+        self.assertFalse(any(icon in out.getvalue() for icon in ("💬", "✏️", "⏳", "💡", "🔷")))
 
     def test_status_file_carries_each_comment_in_full(self):
         row = mine_row(9168, waiting=True, approvals=1,
@@ -184,7 +190,7 @@ class YourPrsSectionTest(unittest.TestCase):
 
 def snapshot(reviews=(), threads=(), approved_by=(), changes_requested_by=()):
     return {"id": "PR1", "kind": "mine", "repo": "ui", "number": 9168,
-            "title": "[WS-5915] Show the exact total", "url": PR, "state": "OPEN",
+            "title": "[ABC-5915] Show the exact total", "url": PR, "state": "OPEN",
             "author": ME, "head": "h1", "updated_at": "2026-11-04T17:00:00Z",
             "approved_by": list(approved_by), "changes_requested_by": list(changes_requested_by),
             "reviews": list(reviews), "issue_comments": [], "threads": list(threads)}
@@ -211,34 +217,30 @@ class NotificationTest(unittest.TestCase):
         [e], _ = ev.diff_pr(snap, st, ev.Ctx(me=ME))
         return e
 
-    def test_approval_with_comments_names_kinds_open_change_request_and_opens_claude(self):
+    def test_one_alert_per_pr_titled_with_dot_ticket_and_reason_opens_claude(self):
         e = self.event(snapshot(
             reviews=[w_review(1, "plaxdan", "APPROVED")],
-            threads=[w_thread(11, "**Suggestion:** add a test"), w_thread(12, "**Nit:** rename"),
-                     w_thread(13, "**Nit:** move the mock")],
-            approved_by=["josh-mills", "plaxdan"], changes_requested_by=["mthomas46"]))
-        n = render.render(e, self.NICK)
-        self.assertEqual(n["title"], "✅ Woods approved your PR · 2/2")
-        self.assertEqual(n["body"], "3 comments to answer: 1 suggestion, 2 nits · "
-                                    "Mykal's change request is still open")
+            threads=[w_thread(11, "**Suggestion:** add a test"), w_thread(12, "**Nit:** rename")],
+            approved_by=["josh-mills", "plaxdan"]))
+        snap = {**snapshot(), "kind": "mine"}
+        n = render.render_pr(snap, "red", "Woods left 2 comments (1 suggestion, 1 nit)", [e],
+                             self.NICK, mine=True)
+        self.assertEqual(n["title"], "🔴 ABC-5915 · Woods left 2 comments (1 suggestion, 1 nit)")
+        self.assertEqual(n["subtitle"], "Show the exact total")
+        self.assertEqual(n["body"], "Woods: add a test")
         self.assertTrue(n["href"].startswith("prdigest://respond?pr="))
         self.assertEqual(view_draft.validated_pr(n["href"], {"org": "avetta"}), PR)
 
-    def test_bare_approval_opens_the_review(self):
-        e = self.event(snapshot(reviews=[w_review(1, "plaxdan", "APPROVED")],
-                                approved_by=["plaxdan"]))
-        n = render.render(e, self.NICK)
-        self.assertEqual((n["title"], n["body"]), ("✅ Woods approved your PR · 1/2", "No comments"))
-        self.assertEqual(n["href"], f"{PR}#pullrequestreview-1")
-
-    def test_change_request_opens_claude(self):
-        e = self.event(snapshot(reviews=[w_review(2, "mthomas46", "CHANGES_REQUESTED")],
-                                threads=[w_thread(21, "Why a Set here?", "mthomas46")],
-                                changes_requested_by=["mthomas46"]))
-        n = render.render(e, self.NICK)
-        self.assertEqual((n["title"], n["body"]),
-                         ("✏️ Mykal requested changes", "1 comment to answer: 1 question"))
-        self.assertTrue(n["href"].startswith("prdigest://respond?pr="))
+    def test_followup_alert_opens_the_blocking_thread(self):
+        pr_ref = {**snapshot(), "author": "mthomas46"}
+        events = [{"type": "thread", "trigger": "reply", "actor": "mthomas46", "first_line": "ok",
+                   "url": "nit-url", "blocking": False, "path": "A.elm"},
+                  {"type": "thread", "trigger": "outdated", "actor": "mthomas46",
+                   "first_line": "", "url": "blocking-url", "blocking": True, "path": "B.elm"}]
+        n = render.render_pr(pr_ref, "red", "Mykal responded to 2 of your comments, 1 blocking",
+                             events, self.NICK, mine=False)
+        self.assertEqual(n["href"], "blocking-url")
+        self.assertEqual(n["body"], "Mykal replied: ok · the code changed under your comment on B.elm")
 
 
 class RespondLinkTest(unittest.TestCase):

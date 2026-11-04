@@ -23,6 +23,12 @@ is armed on Josh's latest comment in it and fires once, on whichever comes first
             since, and the commits since touch the thread's file (ctx.paths_changed)
 A thread Josh resolves himself disarms silently; one resolved by someone else after
 the head moved counts as "outdated". It re-arms only when Josh comments again.
+
+Each thread event carries `blocking` (triage/priority.py is_blocking, true when any of
+Josh's comments in the thread blocks), which colors the PR's follow-up red or yellow.
+
+Others' PRs also fire a "rerequest" event when Josh's review is requested again after
+his last review or comment there (`pending_rerequest`), once per request event.
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from triage import comment_kind
+from triage import comment_kind, priority
 
 DECISIONS = ("APPROVED", "CHANGES_REQUESTED")
 
@@ -144,13 +150,21 @@ def _my_last_index(thread: dict, me: str) -> int | None:
     return idx
 
 
-def _arm(thread: dict, i: int, pr: dict) -> dict:
+def thread_blocking(thread: dict, me: str) -> bool:
+    """Any of Josh's comments in the thread blocks (priority.is_blocking)."""
+    return any(priority.is_blocking(comment_kind.kind(c.get("body") or ""),
+                                    c.get("review_state"))
+               for c in thread["comments"] if c["author"] == me)
+
+
+def _arm(thread: dict, i: int, pr: dict, me: str) -> dict:
     c = thread["comments"][i]
     return {
         "arm_id": c["id"],
         "arm_commit": c.get("original_commit") or c.get("commit") or "",
         "arm_head": pr["head"],
         "outdated_at_arm": thread["outdated"],
+        "blocking": thread_blocking(thread, me),
         "fired": None,
     }
 
@@ -166,7 +180,7 @@ def _thread_event(pr: dict, thread: dict, armed: dict, trigger: str,
         "path": thread["path"], "line": thread.get("line") or thread.get("original_line"),
         "my_comment": mine["body"], "my_comment_url": mine.get("url"),
         "thread": [{"author": c["author"], "body": c["body"]} for c in thread["comments"]],
-        "url": url, "first_line": line,
+        "url": url, "first_line": line, "blocking": thread_blocking(thread, me),
     }
 
 
@@ -180,7 +194,7 @@ def _diff_threads(pr: dict, prev_threads: dict, first_sight: bool, ctx: Ctx
         armed = prev_threads.get(thread["id"])
         rearm = armed is None or armed["arm_id"] != thread["comments"][mine_at]["id"]
         if rearm:
-            armed = _arm(thread, mine_at, pr)
+            armed = _arm(thread, mine_at, pr, ctx.me)
         out[thread["id"]] = armed
         if armed["fired"]:
             continue
@@ -221,6 +235,45 @@ def _diff_threads(pr: dict, prev_threads: dict, first_sight: bool, ctx: Ctx
     return events, out
 
 
+# --- re-requests on others' PRs ----------------------------------------------------
+
+
+def my_last_touch(pr: dict, me: str) -> str:
+    """When Josh last reviewed or commented on the PR (ISO), '' when never."""
+    stamps = [r.get("submitted_at") or "" for r in pr["reviews"]
+              if r["author"] == me and r["state"] != "PENDING"]
+    stamps += [c.get("created_at") or "" for c in pr["issue_comments"] if c["author"] == me]
+    stamps += [c.get("created_at") or "" for t in pr["threads"] for c in t["comments"]
+               if c["author"] == me]
+    return max(stamps, default="")
+
+
+def pending_rerequest(pr: dict, me: str) -> str:
+    """When Josh's review was first requested again after his last touch, '' when it
+    wasn't (or he has never touched the PR, which makes it a first request)."""
+    since = my_last_touch(pr, me)
+    if not since:
+        return ""
+    return min((r["at"] for r in pr.get("review_requests") or []
+                if r["reviewer"] == me and (r.get("at") or "") > since), default="")
+
+
+def _diff_rerequests(pr: dict, prev: dict | None, ctx: Ctx) -> tuple[list[dict], list[str]]:
+    mine_reqs = [r for r in pr.get("review_requests") or [] if r["reviewer"] == ctx.me]
+    seen = set((prev or {}).get("requests_seen", []))
+    ids = sorted(seen | {r["id"] for r in mine_reqs})
+    pending = pending_rerequest(pr, ctx.me)
+    if ctx.seeding or not pending:
+        return [], ids
+    new = [r for r in mine_reqs if r["id"] not in seen and (r.get("at") or "") >= pending
+           and (prev is not None or _after_cutoff(r.get("at"), ctx.cutoff))]
+    if not new:
+        return [], ids
+    r = new[-1]
+    return [{"type": "rerequest", "pr": _pr_ref(pr), "actor": r.get("by") or pr["author"],
+             "at": r.get("at"), "url": pr["url"], "first_line": ""}], ids
+
+
 # --- entry point -----------------------------------------------------------------
 
 
@@ -236,7 +289,10 @@ def diff_pr(pr: dict, prev: dict | None, ctx: Ctx) -> tuple[list[dict], dict]:
         state["threads"] = {}
     else:
         events, threads = _diff_threads(pr, (prev or {}).get("threads", {}), first_sight, ctx)
-        state = {"kind": "others", "seen": [], "threads": threads}
+        rerequests, requests_seen = _diff_rerequests(pr, prev, ctx)
+        events += rerequests
+        state = {"kind": "others", "seen": [], "threads": threads,
+                 "requests_seen": requests_seen}
     state.update({"repo": pr["repo"], "number": pr["number"], "updated_at": pr["updated_at"],
                   "head": pr["head"], "missing_ticks": 0})
     return events, state

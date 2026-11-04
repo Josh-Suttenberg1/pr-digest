@@ -23,6 +23,10 @@ LABELS = {
     "nit": "🔹 Nit",
 }
 
+# The kind as a plain word, for menus and notifications.
+WORDS = {"blocking": "Blocking", "suggestion": "Suggestion", "question": "Question",
+         "comment": "Comment", "nit": "Nit"}
+
 _PLURAL = {"blocking": "blocking", "suggestion": "suggestions", "question": "questions",
            "comment": "comments", "nit": "nits"}
 

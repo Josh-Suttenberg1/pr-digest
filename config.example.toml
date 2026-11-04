@@ -37,9 +37,15 @@ repos = ["processservice", "process-domain", "ui", "workerbridgeservice"]
 days = 90
 out_dir = "~/avetta/JoshWorkspace/review_lessons"
 
+[priority]                       # the menu's red / yellow / green dots
+stale_after_days = 2             # a review you owe turns yellow after waiting this long…
+max_engaged_for_stale = 1        # …while at most this many others have reviewed or commented
+
 [notify]
 swiftbar_plugin = "prdigest.1h.sh"   # the plugin SwiftBar's alerts are sent as
-alert_sound = "Glass"
+alert_sound = "Glass"                # watcher health alerts
+red_sound = "/System/Library/Sounds/Glass.aiff"     # a PR turning red
+yellow_sound = "/System/Library/Sounds/Tink.aiff"   # a PR turning yellow
 
 [session]
 terminal = "iterm"

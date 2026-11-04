@@ -55,9 +55,6 @@ class MinePrTests(unittest.TestCase):
                 approved_by=["plaxdan", "dknight-avetta"])
         [e2], _ = ev.diff_pr(p2, st, ctx())
         self.assertEqual((e2["actor"], e2["approvals"]), ("dknight-avetta", 2))
-        n = render.render(e2, {"dknight-avetta": "DaVinci"})
-        self.assertEqual((n["style"], n["title"], n["body"]),
-                         ("alert", "✅ DaVinci approved your PR · 2/2", "No comments"))
 
     def test_change_request_folds_its_inline_comments(self):
         _, st = ev.diff_pr(pr(), None, ctx(seeding=True))
@@ -66,7 +63,6 @@ class MinePrTests(unittest.TestCase):
                         thread("T2", [c(12, "plaxdan", "guard null", review_id=9)])])
         [e], _ = ev.diff_pr(p, st, ctx())
         self.assertEqual((e["type"], e["state"], e["count"]), ("decision", "CHANGES_REQUESTED", 2))
-        self.assertEqual(render.render(e, {})["style"], "alert")
 
     def test_three_comments_one_notification(self):
         _, st = ev.diff_pr(pr(), None, ctx(seeding=True))
@@ -74,7 +70,6 @@ class MinePrTests(unittest.TestCase):
                threads=[thread(f"T{i}", [c(i, "plaxdan", f"point {i}", review_id=9)]) for i in (1, 2, 3)])
         [e], _ = ev.diff_pr(p, st, ctx())
         self.assertEqual((e["type"], e["count"], e["first_line"]), ("comments", 3, "point 1"))
-        self.assertEqual(render.render(e, {"plaxdan": "Woods"})["title"], "💬 Woods left 3 comments")
 
     def test_bots_and_me_are_ignored(self):
         _, st = ev.diff_pr(pr(), None, ctx(seeding=True))
@@ -133,8 +128,7 @@ class ThreadTests(unittest.TestCase):
     def test_outdated_fires_once_then_reply_does_not(self):
         st = self.armed()
         [e], st = ev.diff_pr(self.base([c(1, ME)], outdated=True), st, ctx())
-        self.assertEqual(e["trigger"], "outdated")
-        self.assertEqual(render.render(e, {})["title"], "🔧 dev changed the code under your comment")
+        self.assertEqual((e["trigger"], e["blocking"]), ("outdated", False))
         self.assertEqual(ev.diff_pr(self.base([c(1, ME), c(2, "dev")], outdated=True), st, ctx())[0], [])
 
     def test_my_new_comment_rearms(self):

@@ -209,26 +209,38 @@ def analyze(pr: dict, me: str, bots: set[str] | frozenset = frozenset()) -> dict
     }
 
 
+def build_row(p: dict, d: dict, me: str, bots: set[str] | frozenset = frozenset()) -> dict:
+    """One PR's row from its search hit `p` (repository.name, number, title, url,
+    updatedAt) and its `detail()`, with `waiting` set when anything in `analyze` is
+    non-empty."""
+    a = analyze(d, me, bots)
+    return {
+        "repo": p["repository"]["name"],
+        "number": p["number"],
+        "title": p["title"],
+        "url": p["url"],
+        "isDraft": d["isDraft"],
+        "updated_at": p.get("updatedAt") or "",
+        "waiting": bool(a["threads_waiting"] or a["blockers"]
+                        or a["unanswered_comments"]),
+        **a,
+    }
+
+
+def row_for(owner: str, name: str, num: int, title: str, url: str, me: str,
+            bots: set[str] | frozenset = frozenset()) -> dict:
+    """The row for one PR, fetched on its own (the watcher's notifications use it)."""
+    hit = {"repository": {"name": name}, "number": num, "title": title, "url": url}
+    return build_row(hit, detail(owner, name, num), me, bots)
+
+
 def mine_triage(me: str, bots: set[str] | frozenset = frozenset()) -> list[dict]:
-    """One row per open PR you author, in search order, each with `waiting` set when
-    anything in `analyze` is non-empty."""
+    """One row per open PR you author, in search order (see `build_row`)."""
     prs = my_open_prs()
 
     def row(p: dict) -> dict:
         owner, name = p["repository"]["nameWithOwner"].split("/")
-        d = detail(owner, name, p["number"])
-        a = analyze(d, me, bots)
-        return {
-            "repo": p["repository"]["name"],
-            "number": p["number"],
-            "title": p["title"],
-            "url": p["url"],
-            "isDraft": d["isDraft"],
-            "updated_at": p.get("updatedAt") or "",
-            "waiting": bool(a["threads_waiting"] or a["blockers"]
-                            or a["unanswered_comments"]),
-            **a,
-        }
+        return build_row(p, detail(owner, name, p["number"]), me, bots)
 
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         return list(pool.map(row, prs))

@@ -88,27 +88,37 @@ GITHUB_TOKEN=ghp_xxx python3 pr_digest.py
 ## Menu bar app (SwiftBar)
 
 For a glanceable view instead of a file, there's a [SwiftBar](https://swiftbar.app)
-plugin: one menu-bar icon that counts only what is **your move**, with a dropdown in
-four sections:
+plugin. Every PR gets **one row** with a priority dot, and the menu-bar title counts
+PRs per color, e.g. `🔴2 🟡1 🟢2` (`✓` when there's nothing to do). A grey legend at
+the top explains the dots: 🔴 needs you now · 🟡 waiting a while · 🟢 new. Each row
+reads `<dot> <ticket> · <what happened> · <PR title>`, so the ticket always says which
+PR it is and truncation cuts the title, not the action. The dropdown has four
+sections, and each PR appears in exactly one:
 
-1. **Your PRs** — every open PR you author, the ones with something for you to answer
-   first. Each row leads with its state (💬 something to answer, ✏️ a change request
-   waiting on the reviewer, ⏳ waiting on reviews, ✅ approved), and a grey line under
-   it reads like `💬 8 to answer (3 suggestions, 5 nits) · ✅ 2/2 approved · ✏️ Mykal
-   requested changes, re-requested`. The submenu lists each reviewer's decision
-   (`✅ Woods approved · 2/2`, the second approval), every comment to answer tagged
-   🛑 Blocking / 💡 Suggestion / ❓ Question / 🔹 Nit and linked to its thread, and
-   **Go through these with Claude**. GitHub drafts with nothing to answer collapse
-   into one submenu.
-2. **Follow-ups on your review comments** — drafted replies to your review comments
-   (from the watcher, with Post / Edit first / Open in Claude / Dismiss), shown when
-   there are some.
-3. **Reviews you owe** — PRs requesting your review that are really on you, ranked.
-   PRs with enough approvals, PRs waiting on their author, and PRs your review can't
-   unblock yet (CI failing, waiting on someone else's change request) are left out.
-   Each row shows its review status and a **Review with Claude** action.
+1. **Your PRs** — every open PR you author. 🔴 when anything waits on you (an open
+   thread whose last comment isn't yours, an unanswered comment, or a change request
+   you haven't re-requested), no dot otherwise, with the row saying what it's waiting
+   on (`Waiting on Joshua and Mykal to re-review`). The submenu says why it's red,
+   lists approvals with dates, change requests and whose move each is, who hasn't
+   reviewed, every comment to answer by kind (Blocking / Suggestion / Question / Nit,
+   linked to its thread), and **Go through these with Claude**. GitHub drafts with
+   nothing to answer collapse into one submenu.
+2. **Follow-ups on your reviews** — others' PRs you reviewed where someone responded.
+   🔴 when the author re-requested you or answered (or changed the code under) one of
+   your blocking comments; 🟡 when only non-blocking ones got responses. The submenu
+   lists every response with the watcher's drafted reply (Post / Edit first / Read
+   Claude's follow-up / Dismiss), then **Post the drafted replies** and the review
+   draft's actions.
+3. **Reviews you owe** — PRs you haven't reviewed yet (or whose review of yours was
+   dismissed). 🟡 when stalled: waiting more than `[priority] stale_after_days`, under
+   the required approvals, and at most `max_engaged_for_stale` others engaged. 🟢
+   otherwise. Each row has its review draft's status and actions.
 4. **Everything else** — a collapsed list of every other open PR you're involved in,
    each with the reason it isn't counted, so you can check the sorting.
+
+Holding ⌥ turns a colored row into **Dismiss**: it loses its dot until something newer
+happens on the PR. The rules live in `triage/priority.py`, which the menu, the
+watcher's notifications, the status files and the personal readouts all share.
 
 Review drafts and follow-up reports open as rendered pages in your browser
 (**📖 Read draft**, via `review/view_draft.py`; nothing leaves your machine). The page's
@@ -117,20 +127,25 @@ draft, once you register the `prdigest://` link handler: run `url-handler/instal
 (`--remove` to undo).
 
 Each refresh also writes `output/status/`: an `index.md` and one file per PR stating
-its section, the reason, and the facts behind it, so a Claude session can start from
+its section, its priority, the reason, and the facts behind it, so a Claude session can start from
 them. The menu's Open in Claude items point the session at that file.
 
-Notifications about your own PRs say what's left for you: `✅ Woods approved your
-PR · 2/2`, with `8 comments to answer: 3 suggestions, 5 nits · Mykal's change request
-is still open` under it. When one leaves you something to answer, clicking it opens a
-Claude session on the PR's comments (a `prdigest://respond` link, so it needs the link
-handler above); otherwise it opens the review. Every notification the watcher sends
-is logged to `~/.cache/pr-digest/watcher.log`.
+**Notifications** come only for PRs that turn red or yellow, one per PR, titled with
+the dot, the ticket and the reason (`🔴 ABC-123 · Mykal answered 2 of your
+comments, 1 blocking`), with a distinct chime for red and a softer one for yellow
+(`[notify] red_sound` / `yellow_sound`, played with `afplay`). All of a tick's events
+on a PR make one notification; later activity at the same or a lower color only
+updates the menu, and a PR pops up again only when it rises (yellow → red) or after
+its row clears. Approvals, green review requests and activity on PRs you haven't
+engaged with never pop up. Clicking one of your PRs' notifications opens a Claude
+session on its comments (a `prdigest://respond` link, so it needs the link handler
+above); a follow-up's opens the comment that was answered. Every notification the
+watcher sends is logged to `~/.cache/pr-digest/watcher.log`. Set SwiftBar to
+**Alerts** in System Settings → Notifications so they stay on screen.
 
-The number counts your PRs with something to answer, follow-ups ready for you, and
-reviews you owe. Other people's comments on PRs you haven't
-engaged with never appear. Bots (GitHub Apps, `*[bot]` logins, and the `bots` list
-in `~/.config/pr-digest/config.toml`) never count as someone waiting on you.
+Other people's comments on PRs you haven't engaged with never appear. Bots (GitHub
+Apps, `*[bot]` logins, and the `bots` list in `~/.config/pr-digest/config.toml`) never
+count as someone waiting on you.
 
 The menu **opens instantly** — it renders from a local cache, never blocking on
 the network. Opening it (and an **hourly** timer) kicks off a detached
@@ -166,10 +181,9 @@ working, stalled, or idle. Run `claude-heartbeat/install.sh` once.
 
 | Menu bar | Meaning |
 |---|---|
-| ✅ (green check) | Nothing is your move. |
-| `3` 📥 | 3 reviews you owe. |
-| `3` 📥 (red) | 3 items, and at least one is a drafted reply or your own PR waiting on you. |
-| `3` 🔄 (spinner) | Refreshing in the background — count and list stay visible. |
+| `✓` | Nothing is your move. |
+| `🔴2 🟡1 🟢2` | PRs per color: 2 need you now, 1 has waited a while, 2 are new. |
+| `🔴2 🟡1` 🔄 (spinner) | Refreshing in the background — the counts and list stay visible. |
 
 **Refresh now** re-fetches on demand.
 

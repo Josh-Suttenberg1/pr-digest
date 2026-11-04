@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SwiftBar plugin: the one PR menu. Shows what is your move, and nothing else counts.
+"""SwiftBar plugin: the one PR menu. Each PR gets one row with a priority dot.
 
 Output follows the SwiftBar/xbar plugin protocol:
   * lines before the first `---` become the menu bar title
@@ -7,33 +7,37 @@ Output follows the SwiftBar/xbar plugin protocol:
 
 Run by the launcher in swiftbar-plugins/prdigest.1h.sh (hourly + on open).
 
-Sections, top to bottom:
-  1. Your PRs — every open PR you author (triage/mine.py), your move first. Each row
-     leads with its state (💬 something to answer, ✏️ a change request waiting on the
-     reviewer, ⏳ waiting on reviews, ✅ approved), and a grey line under it gives the
-     comments to answer by kind, the approval count, and change requests. The submenu
-     has each reviewer's decision (✅ Woods approved · 2/2), every comment to answer
-     tagged by kind and linked to its thread, and a Claude session to work through
-     them. GitHub drafts with nothing to answer collapse into one submenu.
-  2. Follow-ups on your review comments — the watcher's drafted replies (post / edit /
-     open in Claude / dismiss), shown only when there are some.
-  3. Reviews you owe — triage/reviews.py's needs_you PRs outside the parked tier, in
-     ranked order, each with its review status and a "Review with Claude" action
-     (run through review-drafter/menubar.sh, which calls bin/review-pr).
-  4. Everything else — a collapsed list of every other open PR the three GitHub
-     searches (review requested, assigned, authored) or the triage turned up, each
-     with the reason it isn't counted. It exists to check the sorting.
+Every PR is classified once by triage/priority.py, which gives it a section, a color
+(🔴 needs you now, 🟡 waiting a while, 🟢 new, or no dot) and the reason in words.
+Each row reads `<dot> <ticket> · <what happened> · <PR title>`; a grey legend at the
+top explains the dots. Sections, top to bottom:
+  1. Your PRs — every open PR you author (triage/mine.py). The submenu says why it's
+     red, where review stands (approvals with dates, change requests and whose move
+     each is, who hasn't reviewed), every comment to answer by kind and linked to its
+     thread, and a Claude session to work through them. GitHub drafts with nothing to
+     answer collapse into one submenu.
+  2. Follow-ups on your reviews — others' PRs you reviewed where someone responded:
+     a re-request, or replies / code changes under your comments (the watcher's
+     follow-up jobs). The submenu lists every response with its own drafted reply and
+     actions, then Post the drafted replies and the review draft's actions.
+  3. Reviews you owe — PRs you haven't reviewed (or whose review of yours was
+     dismissed), with the review draft's status and actions (run through
+     review-drafter/menubar.sh, which calls bin/review-pr).
+  4. Everything else — a collapsed list of every other open PR the GitHub searches or
+     the triage turned up, each with the reason it isn't counted.
 
-The menu-bar number counts your PRs with something to answer, actionable follow-ups,
-and reviews you owe. Other people's comments on PRs you haven't engaged with never
-appear.
+Each PR appears in exactly one section. Inside a section rows go red, yellow, green,
+then no dot. The menu-bar title counts PRs per color (`🔴2 🟡1 🟢2`), or shows ✓.
+Holding ⌥ turns a colored row into Dismiss: it loses its dot until something newer
+happens on the PR.
 
 Cache-first, so the menu opens instantly. A render reads the last-known result from a
 local cache and prints it immediately (no network), then — if the cache is older than
 REFRESH_TTL — kicks a detached background fetch. That fetch runs the triage, updates
 the cache and pokes SwiftBar to redraw. While a fetch is in flight the icon shows a
-refresh glyph and the count stays visible. Review status (running / failed / draft)
-is read from local files at render time, so it is always current.
+refresh glyph and the counts stay visible. Review status (running / failed / draft)
+and follow-up jobs are read from local files at render time, so they are always
+current.
 """
 
 from __future__ import annotations
@@ -47,6 +51,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO_DIR))
+
+from triage import priority  # noqa: E402
 LAUNCHER = REPO_DIR / "swiftbar-plugins" / "prdigest.1h.sh"
 PLUGIN_ID = "prdigest.1h.sh"  # unique id for swiftbar://refreshplugin
 REVIEW_MENU = REPO_DIR / "review-drafter" / "menubar.sh"   # review actions backend
@@ -61,9 +68,6 @@ REFRESH_TTL = 300
 # A fetch running longer than this is presumed dead (crashed child); its in-flight
 # marker is cleared so the spinner can never wedge permanently.
 MARKER_TTL = 600
-
-VERDICT_MARKS = {"addressed": "✅", "partly": "🟡", "not_addressed": "🔴"}
-
 
 # --------------------------------------------------------------------------- #
 # State: a per-plugin dir holding cache.json and the in-flight marker.
@@ -212,7 +216,8 @@ def write_status(data: dict) -> None:
     try:
         import status_report
         required = _required_approvals()
-        status_report.write(build_sections(data, _followup_jobs(), load_dismissed(), required),
+        status_report.write(build_sections(data, _followup_jobs(), load_dismissed(), required,
+                                           _nicknames(), prio=_priority_settings()),
                             data, _nicknames(), required=required)
     except Exception:  # noqa: BLE001 — the status files must never break the menu
         pass
@@ -259,19 +264,13 @@ def kick_background_fetch() -> None:
 # --------------------------------------------------------------------------- #
 # Sorting the fetched data into the three sections (pure: no I/O)
 # --------------------------------------------------------------------------- #
-PARKED_TIER = 2
+PARKED_TIER = priority.PARKED_TIER
 
 
 def _key(url: str) -> str:
     """`processservice#833` from a PR url."""
     parts = url.rstrip("/").split("/")
     return f"{parts[-3]}#{parts[-1]}"
-
-
-def _parked_reason(st: dict) -> str:
-    parked = [t for t in st.get("tags") or []
-              if t.startswith("CI failing") or "approvals already" in t]
-    return "parked — " + ("; ".join(parked) or "your review can't unblock it yet")
 
 
 def mine_activity(row: dict) -> str:
@@ -283,90 +282,62 @@ def mine_activity(row: dict) -> str:
     return max(stamps, default="")
 
 
-def group_followups(jobs: list[dict]) -> list[dict]:
-    """One group per PR: {"pr", "jobs", "acted_at"}, newest activity first. A group's
-    `acted_at` is when the watcher saw the author's latest move on any of its threads."""
-    groups: dict[str, dict] = {}
-    for job in jobs:
-        g = groups.setdefault(job["pr"]["id"], {"pr": job["pr"], "jobs": [], "acted_at": ""})
-        g["jobs"].append(job)
-        g["acted_at"] = max(g["acted_at"], job.get("created_at") or "")
-    return sorted(groups.values(), key=lambda g: g["acted_at"], reverse=True)
-
-
-# Where one of your PRs stands, in the order the Your PRs section lists them.
-MINE_STATES = ("move", "changes", "waiting", "approved")
-MINE_ICONS = {"move": "💬", "changes": "✏️", "waiting": "⏳", "approved": "✅"}
-
-
-def mine_state(row: dict, required: int) -> str:
-    """move: something on it is waiting on you (and you haven't dismissed it).
-    changes: a change request stands and the next move is the reviewer's.
-    approved: enough approvals and no change request. waiting: everything else."""
-    if row.get("waiting") and not row.get("dismissed"):
-        return "move"
-    if row.get("blockers") or row.get("answered_change_requests"):
-        return "changes"
-    if len(row.get("approvals") or []) >= required:
-        return "approved"
-    return "waiting"
+def _priority_settings() -> dict:
+    try:
+        import settings
+        return settings.load()["priority"]
+    except Exception:  # noqa: BLE001
+        return {"stale_after_days": 2, "max_engaged_for_stale": 1}
 
 
 def build_sections(data: dict, followup_jobs: list[dict],
-                   dismissed: dict[str, str] | None = None, required: int = 2) -> dict:
-    """Sort cached data into the menu's sections.
+                   dismissed: dict[str, str] | None = None, required: int = 2,
+                   nick: dict[str, str] | None = None, now: datetime | None = None,
+                   prio: dict | None = None) -> dict:
+    """Sort cached data into the menu's sections through triage/priority.py.
 
-    Returns {"mine": [...], "mine_drafts": [...], "followups": [groups], "owed": [...],
-    "other": [(reason, item), ...], "count": int}.
+    Returns {"mine", "mine_drafts", "followups", "owed": [entry], "other": [(reason,
+    item)], "counts": {color: n}, "title": str, "count": int}. An entry is a
+    priority.classify result (url, title, section, color, reason, why, waiting_since,
+    activity_at, dismissed, row | st, jobs).
 
-    `mine` is every open PR you author that isn't a GitHub draft, each copied with
-    `state` (MINE_STATES) and `dismissed` set: your move first (newest activity
-    first), then change requests, then those waiting on reviews, then approved ones.
-    A GitHub draft with something waiting on you is listed there too; the rest are
-    in `mine_drafts`.
+    Each PR appears in exactly one section. Inside a section rows go red, yellow,
+    green, then no dot; inside a color the longest wait first, except Reviews you owe,
+    which keeps reviews.ranked() order. GitHub drafts of yours with no dot collapse
+    into `mine_drafts`. `dismissed` maps a PR url to the activity time it was
+    dismissed at; the row loses its dot until something newer happens.
 
-    `count` is what the menu bar shows: your PRs in the "move" state, PRs with an
-    actionable follow-up (ready or failed), and reviews you owe. `dismissed` maps one
-    of your PR urls to the activity timestamp it was dismissed at; it stops counting
-    until newer activity arrives."""
-    dismissed = dismissed or {}
+    `title` is the menu-bar title (priority.title) and `count` the PRs with a dot."""
+    nick = nick or {}
+    now = now or datetime.now(timezone.utc)
+    prio = prio or {"stale_after_days": 2, "max_engaged_for_stale": 1}
     reviews = data.get("reviews") or {}
-    followups = group_followups([j for j in followup_jobs
-                                 if j.get("status") in ("ready", "running", "queued", "failed")])
-    mine_rows, mine_drafts = [], []
-    for r in data.get("mine") or []:
-        hidden_at = dismissed.get(r["url"])
-        row = {**r, "dismissed": bool(r.get("waiting") and hidden_at
-                                      and mine_activity(r) <= hidden_at)}
-        row["state"] = mine_state(row, required)
-        (mine_drafts if r.get("isDraft") and row["state"] != "move" else mine_rows).append(row)
-    mine_rows.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
-    mine_rows.sort(key=lambda r: mine_activity(r) if r["state"] == "move" else "", reverse=True)
-    mine_rows.sort(key=lambda r: MINE_STATES.index(r["state"]))
-    needs = reviews.get("needs_you") or []
-    owed = [st for st in needs if st.get("tier") != PARKED_TIER]
+    entries = priority.classify(
+        data.get("mine") or [], reviews, followup_jobs, nick=nick, now=now,
+        required=required, stale_after_days=prio["stale_after_days"],
+        max_engaged=prio["max_engaged_for_stale"], dismissed=dismissed or {})
 
-    other: list[tuple[str, dict]] = []
-    for st in needs:
-        if st.get("tier") == PARKED_TIER:
-            other.append((_parked_reason(st), st))
-    for st in reviews.get("author") or []:
-        other.append(("waiting on the author — " + st.get("reason", ""), st))
-    for st in reviews.get("well_approved") or []:
-        other.append(("enough approvals — " + st.get("reason", ""), st))
-    for st in reviews.get("done") or []:
-        other.append(("you approved — " + st.get("reason", ""), st))
-    for st in reviews.get("unreadable") or []:
-        other.append(("couldn't read it from GitHub; it will be retried", st))
+    ranked = {st.get("pr_url"): i for i, st in enumerate(reviews.get("needs_you") or [])}
+    mine_rows = [e for e in entries if e["section"] == priority.MINE]
+    mine_drafts = [e for e in mine_rows if e["row"].get("isDraft") and not e["color"]
+                   and not e["dismissed"]]
+    mine_rows = [e for e in mine_rows if e not in mine_drafts]
+    mine_rows.sort(key=lambda e: e["row"].get("updated_at") or "", reverse=True)
+    mine_rows.sort(key=priority.sort_key)
+    followups = sorted((e for e in entries if e["section"] == priority.FOLLOWUP),
+                       key=priority.sort_key)
+    owed = sorted((e for e in entries if e["section"] == priority.OWED),
+                  key=lambda e: priority.sort_key(e, ranked.get(e["url"], len(ranked))))
+    other: list[tuple[str, dict]] = [(e["reason"], e["st"]) for e in entries
+                                     if e["section"] == priority.OTHER]
 
-    placed = {item.get("pr_url") for _, item in other}
-    placed |= {st.get("pr_url") for st in owed}
-    placed |= {r.get("url") for r in mine_rows + mine_drafts}
+    placed = {e["url"] for e in entries}
     me = (data.get("me") or "").lower()
     for pr in data.get("legacy") or []:
         url = pr.get("url", "").rstrip("/")
         if url in placed:
             continue
+        placed.add(url)
         sources = ", ".join(s.lower() for s in pr.get("sources") or []) or "search"
         if (pr.get("author") or "").lower() == me:
             reason = "your PR, not triaged (check this)"
@@ -379,16 +350,17 @@ def build_sections(data: dict, followup_jobs: list[dict],
         other.append((reason, {"pr_url": url, "title": pr.get("title", ""),
                                "author": pr.get("author", "")}))
 
-    actionable = [g for g in followups
-                  if any(j.get("status") in ("ready", "failed") for j in g["jobs"])]
-    yours = [r for r in mine_rows if r["state"] == "move"]
+    shown = mine_rows + followups + owed
+    counts = priority.counts(shown)
     return {
         "mine": mine_rows,
         "mine_drafts": mine_drafts,
         "followups": followups,
         "owed": owed,
         "other": other,
-        "count": len(yours) + len(actionable) + len(owed),
+        "counts": counts,
+        "title": priority.title(shown),
+        "count": sum(counts.values()),
     }
 
 
@@ -495,56 +467,103 @@ def review_status(key: str, head: str) -> dict:
     return out
 
 
-def owed_block(st: dict) -> None:
-    url = st["pr_url"]
-    key = _key(url)
-    status = review_status(key, st.get("head_sha") or "")
-    mark = ""
-    if "running" in status:
-        mark = f" · 🔄 {fmt_dur(status['running']['elapsed'])}"
-    elif status.get("draft", {}).get("current"):
-        mark = " · 📝 draft ready"
-    elif "draft" in status:
-        mark = " · 📝 draft is for an older commit"
-    elif "failed" in status:
-        mark = " · ⚠️ review failed"
-    emit(f"{_label(st)}{mark}", href=url, tooltip=sanitize(st.get("reason", "")))
-    who = st.get("author", "?")
-    emit(f"--from {who} · {sanitize(' · '.join(st.get('tags') or []))}", color="#888888")
-    emit(f"--why: {sanitize(st.get('reason', ''))}", color="#888888")
-    emit("--View on GitHub", href=url)
+ROW_MAX = 100
+
+
+def row_text(e: dict, limit: int = ROW_MAX) -> str:
+    """'🔴 ABC-123 · Woods left 8 comments (3 suggestions, 5 nits) · Show the exact…':
+    the ticket first so the row always says which PR it is, then what happened, then
+    as much of the title as fits."""
+    key = priority.ticket(e.get("title") or "", e["url"])
+    d = priority.dot(e.get("color"))
+    head = f"{d} {key}" if d else key
+    head += f" · {sanitize(e.get('reason') or '')}"
+    title = sanitize(_title({"title": e.get("title") or ""}))
+    if not title:
+        return head
+    return f"{head} · {truncate(title, max(limit - len(head) - 3, 16))}"
+
+
+def _pr_header(e: dict) -> None:
+    """The submenu's first lines: repo#number with the full title, then why."""
+    emit(f"--{_key(e['url'])} · {truncate(sanitize(_title(e)), 80)}", href=e["url"])
+    if e.get("why"):
+        emit(f"--{sanitize(e['why'])}", color="#888888")
+
+
+def _draft_actions(key: str, head: str, url: str) -> None:
+    """The review draft's actions: running (cancel), failed, Read draft, Re-run review
+    or Review with Claude, and Open in Claude."""
+    status = review_status(key, head)
     if "running" in status:
         run = status["running"]
-        emit(f"--🔄 {sanitize(run['step'])} · {fmt_dur(run['elapsed'])}", color="#d29922")
-        emit("--✖ Cancel this review", bash=str(REVIEW_MENU), param1="--cancel",
+        emit(f"--Review running: {sanitize(run['step'])} · {fmt_dur(run['elapsed'])}",
+             color="#d29922")
+        emit("--Cancel this review", bash=str(REVIEW_MENU), param1="--cancel",
              param2=key, terminal="false", refresh="true")
         return
-    if "failed" in status:
-        emit(f"--⚠️ last attempt failed: {sanitize(status['failed'])[:120]}", color="#d29922")
+    draft = status.get("draft")
+    if draft and draft["path"]:
+        _read_item("--Read draft", draft["path"])
+    emit("--Re-run review" if draft else "--Review with Claude", bash=str(REVIEW_MENU),
+         param1="--review", param2=key, terminal="false", refresh="true")
+    if draft:
+        emit("--Open in Claude", bash=str(REVIEW_MENU), param1="--open-claude",
+             param2=key, terminal="false")
+    else:
+        _claude_item("--Open in Claude", _status_prompt(f"Let's look at the PR {url}.", url))
+
+
+def _draft_line(key: str, head: str) -> str:
+    """"Claude's draft: …" in words."""
+    status = review_status(key, head)
+    if "running" in status:
+        return f"Claude's draft: running, {fmt_dur(status['running']['elapsed'])} in"
     draft = status.get("draft")
     if draft:
-        if not draft["current"]:
-            emit("--⚠️ new commits since this review", color="#d29922")
-        summary = f"{draft['severity']}: {draft['counts']}" if draft["counts"] else draft["severity"]
-        emit(f"--📝 {sanitize(summary)}")
-        emit("--💬 Open in Claude", bash=str(REVIEW_MENU), param1="--open-claude",
-             param2=key, terminal="false")
-        if draft["path"]:
-            _read_item("--📖 Read draft", draft["path"])
-    label = "🔁 Re-run the review" if draft else "🤖 Review with Claude"
-    emit(f"--{label}", bash=str(REVIEW_MENU), param1="--review", param2=key,
-         terminal="false", refresh="true")
+        summary = f" ({draft['severity']}: {draft['counts']})" if draft["counts"] else (
+            f" ({draft['severity']})" if draft["severity"] else "")
+        return ("Claude's draft: current" if draft["current"]
+                else "Claude's draft: for an older commit") + summary
+    if "failed" in status:
+        return f"Claude's draft: the last attempt failed ({sanitize(status['failed'])[:80]})"
+    return "Claude's draft: none yet"
+
+
+def _dismiss(e: dict, jobs: list[dict] = ()) -> None:
+    """⌥ Dismiss for a colored row (or one already dismissed): it loses its dot until
+    newer activity. Goes after the row's submenu."""
+    if not e.get("color"):
+        return
+    params = {"param1": "--dismiss", "param2": e["url"],
+              "param3": e.get("activity_at") or ""}
+    if jobs:
+        params["param4"] = ",".join(j["id"] for j in jobs if j.get("id"))
+    _dismiss_line(priority.ticket(e.get("title") or "", e["url"]), bash=str(LAUNCHER),
+                  **params)
+
+
+def owed_block(e: dict, nick: dict[str, str]) -> None:
+    """A review you owe: the reason in words, then the review draft and its actions."""
+    st = e["st"]
+    url = e["url"]
+    key = _key(url)
+    emit(row_text(e), href=url)
+    _pr_header(e)
+    emit(f"--{st.get('size', '')} · by {_who(st.get('author', '?'), nick)}", color="#888888")
+    emit(f"--{_draft_line(key, st.get('head_sha') or '')}", color="#888888")
+    emit("-----")
+    _draft_actions(key, st.get("head_sha") or "", url)
+    emit("--Open on GitHub", href=url)
+    _dismiss(e)
 
 
 def _who(login: str, nick: dict[str, str]) -> str:
-    if login.startswith("team:"):
-        return login[len("team:"):]
-    return nick.get(login, login)
+    return priority.who(login, nick)
 
 
 def _names(logins, nick: dict[str, str]) -> str:
-    names = [_who(x, nick) for x in logins]
-    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    return priority.names(logins, nick)
 
 
 def to_answer(row: dict) -> list[dict]:
@@ -568,91 +587,74 @@ def to_answer(row: dict) -> list[dict]:
     return items
 
 
-def mine_status_line(row: dict, nick: dict[str, str], required: int) -> str:
-    """One line under the PR: what's yours to answer, the approval count, and any
-    change request with whose move it is."""
-    from triage import comment_kind as ck
-    parts = []
-    asks = to_answer(row)
-    if asks:
-        parts.append(f"💬 {len(asks)} to answer ({ck.phrase(i['kind'] for i in asks)})")
-    for b in row.get("blockers") or []:
-        parts.append(f"✏️ {_who(b['author'], nick)} requested changes, re-request once answered")
-    n = len(row.get("approvals") or [])
-    parts.append(f"✅ {n}/{required} approved" if n else f"0/{required} approved")
-    waiting_on = [b["author"] for b in row.get("answered_change_requests") or []]
-    if waiting_on:
-        parts.append(f"✏️ {_names(waiting_on, nick)} requested changes, re-requested")
-    if row.get("dismissed"):
-        parts.append("dismissed")
-    return " · ".join(parts)
-
-
-def _reviews_submenu(row: dict, nick: dict[str, str], required: int) -> None:
+def review_lines(row: dict, nick: dict[str, str], required: int) -> list[tuple[str, str]]:
+    """Where review of one of your PRs stands, as (text, link) lines: approvals with
+    their dates, change requests and whose move each is, and who hasn't reviewed."""
     url = row["url"]
     requested = list(row.get("requested") or [])
-    decided = set()
-    emit("--Reviews", color="#888888")
-    for a in row.get("approvals") or []:
-        decided.add(a["author"])
-        again = " · re-requested" if a["author"] in requested else ""
-        emit(f"--✅ {_who(a['author'], nick)} approved · {a['ordinal']}/{required} · "
-             f"{when(a.get('at'))}{again}", href=a.get("url") or url)
+    approvals = row.get("approvals") or []
+    decided = {a["author"] for a in approvals}
+    lines = []
+    if approvals:
+        each = ", ".join(f"{_who(a['author'], nick)} {when(a.get('at'))}".strip()
+                         for a in approvals)
+        lines.append((f"Approvals: {len(approvals)} of {required} ({each})",
+                      approvals[-1].get("url") or url))
+    else:
+        lines.append((f"Approvals: 0 of {required}", ""))
+    crs = []
     for b in row.get("blockers") or []:
         decided.add(b["author"])
-        emit(f"--✏️ {_who(b['author'], nick)} requested changes · {when(b.get('at'))} · "
-             f"answer, then re-request", href=b.get("url") or url)
+        crs.append(f"{_who(b['author'], nick)} ({when(b.get('at'))}, answer, then re-request)")
     for b in row.get("answered_change_requests") or []:
         decided.add(b["author"])
-        emit(f"--✏️ {_who(b['author'], nick)} requested changes · {when(b.get('at'))} · "
-             f"you re-requested {when(b.get('rerequested_at'))}, waiting on them",
-             href=b.get("url") or url)
+        crs.append(f"{_who(b['author'], nick)} (you re-requested "
+                   f"{when(b.get('rerequested_at'))}, waiting on them)")
+    if crs:
+        lines.append(("Change requests: " + "; ".join(crs), ""))
     pending = [r for r in requested if r not in decided]
     if pending:
-        emit(f"--⏳ No review yet: {_names(pending, nick)}", color="#888888")
-    if not decided and not pending:
-        emit("--⏳ No reviews yet and no one requested", color="#888888")
+        lines.append((f"Not reviewed yet: {_names(pending, nick)}", ""))
+    elif not decided:
+        lines.append(("No reviews yet and no one requested", ""))
+    return lines
 
 
-def mine_block(row: dict, nick: dict[str, str], required: int) -> None:
-    """One of your PRs: a status icon and the PR, a status line under it, and a
-    submenu with each reviewer's decision, every comment to answer (linked to its
-    thread), and a Claude session for working through them."""
-    url = row["url"]
+def mine_block(e: dict, nick: dict[str, str], required: int) -> None:
+    """One of your PRs: the row, then a submenu with why it's red, where review
+    stands, every comment to answer (by kind, linked to its thread), and a Claude
+    session for working through them."""
     from triage import comment_kind as ck
-    acted = mine_activity(row)
-    date = when(acted) if row["state"] == "move" else ""
-    emit(f"{MINE_ICONS[row['state']]} {_label(row)}" + (f" · {date}" if date else ""),
-         href=url)
-    _reviews_submenu(row, nick, required)
+    row = e["row"]
+    url = row["url"]
+    emit(row_text(e), href=url)
+    _pr_header(e)
+    for text, link in review_lines(row, nick, required):
+        emit(f"--{sanitize(text)}", href=link, color="" if link else "#888888")
     asks = to_answer(row)
     if asks:
         emit("-----")
-        emit(f"--To answer ({len(asks)}): {ck.phrase(i['kind'] for i in asks)}",
-             color="#888888")
+        emit(f"--To answer ({len(asks)})", color="#888888")
         for i in asks:
             where = f" · {Path(i['path']).name}" if i["path"] else ""
-            emit(f"--{ck.LABELS.get(i['kind'], i['kind'])} · {_who(i['author'], nick)}{where} — "
+            emit(f"--{ck.WORDS.get(i['kind'], i['kind'])} · {_who(i['author'], nick)}{where} — "
                  f"{truncate(sanitize(i['summary']), 80)}",
                  href=i["url"] or url, tooltip=truncate(sanitize(i["body"]), 600))
     emit("-----")
     if asks or row.get("blockers"):
-        _claude_item("--🤖 Go through these with Claude", _respond_prompt(url))
+        _claude_item("--Go through these with Claude", _respond_prompt(url))
     else:
-        _claude_item("--🤖 Open in Claude", _status_prompt(f"Let's look at my PR {url}.", url))
-    emit("--🌐 Open on GitHub", href=url)
+        _claude_item("--Open in Claude", _status_prompt(f"Let's look at my PR {url}.", url))
+    emit("--Open on GitHub", href=url)
     # The ⌥ alternate goes after the submenu: SwiftBar hangs `--` lines on the item
     # just above them, so placing it first would give the submenu to the alternate.
-    if row["state"] == "move":
-        _dismiss_line(_key(url), bash=str(LAUNCHER), param1="--dismiss-mine", param2=url,
-                      param3=acted)
-    emit(f"    {mine_status_line(row, nick, required)}", color="#888888", size="12")
+    _dismiss(e)
 
 
-def mine_drafts_block(rows: list[dict]) -> None:
-    emit(f"📝 Your GitHub drafts ({len(rows)})", color="#888888")
-    for row in rows:
-        emit(f"--{_label(row)}", href=row["url"])
+def mine_drafts_block(entries: list[dict]) -> None:
+    emit(f"Your GitHub drafts ({len(entries)})")
+    for e in entries:
+        emit(f"--{row_text(e)}", href=e["url"])
 
 
 def when(stamp) -> str:
@@ -704,90 +706,100 @@ def _dismiss_line(label: str, **action: str) -> None:
          sfimage="xmark.circle", **action)
 
 
-def _job_detail(job: dict, who: str) -> None:
-    """One thread's follow-up inside its PR's submenu. A ready job shows the verdict and
-    the full drafted reply; "Post this reply" posts exactly that text (the click is your
-    approval), "Edit first" opens the reply file, and posting then uses whatever the
-    file holds."""
-    where = f"{Path(job.get('path') or '').name}:{job.get('line')}" if job.get("path") else "thread"
-    if job["status"] in ("running", "queued"):
-        emit(f"--🔄 checking {who}'s commits · {where}", href=job["url"])
-        return
-    if job["status"] == "failed":
-        emit(f"--⚠️ follow-up failed · {where}", href=job["url"], color="#d08770")
-        emit(f"--{sanitize(job.get('error') or 'unknown error')}", color="#888888")
-        emit("--Dismiss this one", bash=str(WATCHER), param1="dismiss", param2=job["id"],
-             terminal="false", refresh="true")
-        return
-    verdict = job["verdict"].replace("_", " ")
-    emit(f"--{VERDICT_MARKS.get(job['verdict'], '🔎')} {verdict} · {where}", href=job["url"])
-    emit(f"--Your comment: {truncate(sanitize(job.get('my_comment') or ''), 80)}",
-         color="#888888", tooltip=sanitize(job.get("my_comment") or ""))
-    reply_file = Path(job["reply_file"])
-    reply = reply_file.read_text() if reply_file.exists() else ""
-    emit("--Drafted reply:", color="#888888")
-    for line in reply.strip().splitlines():
-        if line.strip():
-            emit(f"--{truncate(sanitize(line), 90)}", tooltip=sanitize(line))
-    emit("--✅ Post this reply", bash=str(WATCHER), param1="post", param2=job["id"],
-         terminal="false", refresh="true")
-    emit("--✏️ Edit first", bash="/usr/bin/open", param1="-t", param2=job["reply_file"],
-         terminal="false")
-    _claude_item("--💬 Open in Claude", _status_prompt(
-        f"Let's go over the follow-up on my review comment: {job['report']}", job["url"]))
-    _read_item("--📖 Read report", job["report"])
-    emit("--Dismiss this one", bash=str(WATCHER), param1="dismiss", param2=job["id"],
-         terminal="false", refresh="true")
-
-
-def followup_group_block(group: dict, nick: dict[str, str]) -> None:
-    """One row per PR for the follow-ups on your review comments there, dated by when
-    the author last moved. Each thread's verdict and drafted reply sit in the submenu;
-    holding ⌥ turns the row into Dismiss for all of them."""
-    from watcher import render
-    jobs = group["jobs"]
-    who = nick.get(jobs[0]["actor"], jobs[0]["actor"])
-    sub = render.subtitle(group["pr"])
-    verdicts = [j.get("verdict") for j in jobs if j["status"] == "ready"]
-    if any(j["status"] in ("running", "queued") for j in jobs):
-        head = f"🔄 checking {who}'s commits"
-    elif any(j["status"] == "failed" for j in jobs):
-        head = "⚠️ follow-up failed"
-    elif verdicts and all(v == "addressed" for v in verdicts):
-        n = len(verdicts)
-        which = {1: "your comment", 2: "both your comments"}.get(n, f"all {n} of your comments")
-        head = f"✅ {who} addressed {which}"
+def _response_text(job: dict, nick: dict[str, str]) -> str:
+    """'Blocking · Types.elm:42 · Mykal replied: "Moved the check…" · addressed'."""
+    from triage import comment_kind as ck
+    kind = "blocking" if priority.job_blocking(job) else ck.kind(job.get("my_comment") or "")
+    where = (f"{Path(job.get('path') or '').name}" + (f":{job['line']}" if job.get("line") else "")
+             if job.get("path") else "thread")
+    actor = _who(job.get("actor") or "", nick)
+    if job.get("trigger") == "reply":
+        reply = next((c["body"] for c in reversed(job.get("thread") or [])
+                      if c.get("author") == job.get("actor")), "")
+        what = f'{actor} replied: "{ck.summary(reply, 50)}"' if reply else f"{actor} replied"
     else:
-        done = sum(1 for v in verdicts if v == "addressed")
-        head = f"🟡 {who}: {done} of {len(verdicts)} comments addressed"
-    date = when(group["acted_at"])
-    emit(f"{head} · {sub}" + (f" · {date}" if date else ""), href=jobs[0]["url"])
-    for i, job in enumerate(jobs):
-        if i:
-            emit("-----")
-        _job_detail(job, who)
-    # After the submenu, so the submenu stays on the row and not on its ⌥ alternate.
-    _dismiss_line(sub, bash=str(WATCHER), param1="dismiss",
-                  param2=",".join(j["id"] for j in jobs))
+        what = "code changed under your comment"
+    state = {"ready": (job.get("verdict") or "").replace("_", " "),
+             "running": "checking the commits…", "queued": "checking the commits…",
+             "failed": "follow-up failed"}.get(job["status"], job["status"])
+    return f"{ck.WORDS.get(kind, kind)} · {where} · {what} · {state}"
+
+
+def _response_detail(job: dict) -> None:
+    """Third-level submenu of one response: your comment, Claude's drafted reply, and
+    the per-reply actions. "Post this reply" posts exactly the reply file's text (the
+    click is your approval); "Edit first" opens it, and posting then uses whatever
+    the file holds."""
+    emit("----Open the thread on GitHub", href=job["url"])
+    emit(f"----Your comment: {truncate(sanitize(job.get('my_comment') or ''), 80)}",
+         color="#888888", tooltip=sanitize(job.get("my_comment") or ""))
+    if job["status"] == "failed":
+        emit(f"----{sanitize(job.get('error') or 'unknown error')}", color="#888888")
+    if job["status"] == "ready":
+        reply_file = Path(job["reply_file"])
+        reply = reply_file.read_text() if reply_file.exists() else ""
+        emit("----Drafted reply:", color="#888888")
+        for line in reply.strip().splitlines():
+            if line.strip():
+                emit(f"----{truncate(sanitize(line), 90)}", tooltip=sanitize(line))
+        emit("----Post this reply", bash=str(WATCHER), param1="post", param2=job["id"],
+             terminal="false", refresh="true")
+        emit("----Edit first", bash="/usr/bin/open", param1="-t", param2=job["reply_file"],
+             terminal="false")
+        _read_item("----Read Claude's follow-up", job["report"])
+    emit("----Dismiss this one", bash=str(WATCHER), param1="dismiss", param2=job["id"],
+         terminal="false", refresh="true")
+
+
+def followup_block(e: dict, nick: dict[str, str]) -> None:
+    """Others' PR you reviewed, where someone responded: every response in one place,
+    each with its own submenu, then the PR's actions."""
+    url = e["url"]
+    st = e.get("st") or {}
+    jobs = e.get("jobs") or []
+    emit(row_text(e), href=url)
+    _pr_header(e)
+    if st.get("rerequested_at"):
+        emit(f"--{_who(st.get('author', ''), nick)} re-requested your review "
+             f"{when(st['rerequested_at'])}", color="#888888")
+    if jobs:
+        emit(f"--Responses ({len(jobs)})", color="#888888")
+        for job in jobs:
+            emit(f"--{truncate(sanitize(_response_text(job, nick)), 110)}")
+            _response_detail(job)
+        ready = [j for j in jobs if j["status"] == "ready"]
+        if ready and len(ready) == len(jobs):
+            emit("--Claude drafted a reply to " + ("it" if len(jobs) == 1 else "each"),
+                 color="#888888")
+    emit("-----")
+    ready = [j for j in jobs if j["status"] == "ready"]
+    if len(ready) == 1:
+        _read_item("--Read Claude's follow-up", ready[0]["report"])
+    elif ready:
+        emit("--Read Claude's follow-up")
+        for j in ready:
+            where = Path(j.get("path") or "").name + (f":{j['line']}" if j.get("line") else "")
+            _read_item(f"----{where or 'thread'}", j["report"])
+    if ready:
+        emit("--Post the drafted replies", bash=str(WATCHER), param1="post",
+             param2=",".join(j["id"] for j in ready), terminal="false", refresh="true")
+    head = st.get("head_sha") or ((jobs[0].get("pr") or {}).get("head") if jobs else "") or ""
+    _draft_actions(_key(url), head, url)
+    emit("--Open on GitHub", href=url)
+    _dismiss(e, jobs)
 
 
 def render_menu(sections: dict, *, spinner: bool, error: str | None,
                 have_data: bool, nick: dict[str, str], required: int = 2) -> None:
-    count = sections["count"]
-    yours = [r for r in sections["mine"] if r["state"] == "move"]
-    urgent = bool(sections["followups"] or yours)
+    title = sections.get("title") or "✓"
 
     # --- menu bar title (single line) ---
     if spinner:
-        emit(str(count) if count else "", sfimage="arrow.triangle.2.circlepath")
+        emit("" if title == "✓" else title, sfimage="arrow.triangle.2.circlepath")
     elif error and not have_data:
         emit(sfimage="exclamationmark.triangle", sfcolor="orange")
-    elif count == 0:
-        emit(sfimage="checkmark.circle", sfcolor="green")
-    elif urgent:
-        emit(str(count), sfimage="tray.full.fill", sfcolor="red")
     else:
-        emit(str(count), sfimage="tray.full")
+        emit(title)
 
     print("---")
 
@@ -802,38 +814,32 @@ def render_menu(sections: dict, *, spinner: bool, error: str | None,
     if not have_data:
         emit("Sorting your PRs… (about a minute the first time)", color="#888888")
     else:
-        mine = sections["mine"]
-        if yours:
-            head = (f"Your PRs ({len(mine)}) — {len(yours)} "
-                    f"need{'s' if len(yours) == 1 else ''} you · hold ⌥ to dismiss")
-        else:
-            head = f"Your PRs ({len(mine)}) — nothing to answer"
-        emit(head, color="#888888")
-        for row in mine:
-            mine_block(row, nick, required)
+        emit(priority.LEGEND + " · hold ⌥ to dismiss", color="#888888", size="12")
+        print("---")
+        emit("Your PRs", color="#888888")
+        for e in sections["mine"]:
+            mine_block(e, nick, required)
         if sections["mine_drafts"]:
             mine_drafts_block(sections["mine_drafts"])
-        if not mine and not sections["mine_drafts"]:
+        if not sections["mine"] and not sections["mine_drafts"]:
             emit("No open PRs", color="#6b6b70")
 
         if sections["followups"]:
             print("---")
-            emit(f"Follow-ups on your review comments ({len(sections['followups'])}) "
-                 f"— hold ⌥ to dismiss", color="#888888")
-            for group in sections["followups"]:
-                followup_group_block(group, nick)
+            emit("Follow-ups on your reviews", color="#888888")
+            for e in sections["followups"]:
+                followup_block(e, nick)
 
         print("---")
-        emit(f"Reviews you owe ({len(sections['owed'])})", color="#888888")
-        for st in sections["owed"]:
-            owed_block(st)
+        emit("Reviews you owe", color="#888888")
+        for e in sections["owed"]:
+            owed_block(e, nick)
         if not sections["owed"]:
             emit("No reviews owed", color="#6b6b70")
 
         print("---")
         other = sections["other"]
-        emit(f"Everything else ({len(other)}) — not counted", color="#888888")
-        emit("Why each PR isn't counted (for checking the sorting)", sfimage="list.bullet")
+        emit(f"Everything else ({len(other)}), not counted")
         for reason, item in sorted(other, key=lambda pair: pair[0]):
             url = item.get("pr_url") or item.get("url") or ""
             emit(f"--{_label(item)}", href=url, tooltip=sanitize(reason))
@@ -843,8 +849,7 @@ def render_menu(sections: dict, *, spinner: bool, error: str | None,
     print("---")
     emit("Refresh now", bash=str(LAUNCHER), param1="--fetch", terminal="false",
          sfimage="arrow.clockwise")
-    emit(f"Updated {cache_label()}", color="#888888")
-    emit(watcher_label(), color="#888888")
+    emit(f"Updated {cache_label()} · {watcher_label()}", color="#888888")
 
 
 def _nicknames() -> dict[str, str]:
@@ -864,8 +869,8 @@ def _required_approvals() -> int:
 
 
 def load_dismissed() -> dict[str, str]:
-    """Your PRs you dismissed from Waiting on you: url → the activity timestamp at the
-    time. A PR comes back once something newer happens on it."""
+    """PRs whose row you dismissed: url → the activity timestamp at the time. The
+    row gets its dot back once something newer happens on it."""
     try:
         data = json.loads((state_dir() / "dismissed.json").read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
@@ -873,12 +878,22 @@ def load_dismissed() -> dict[str, str]:
         return {}
 
 
-def dismiss_mine(url: str, acted_at: str) -> None:
+def dismiss(url: str, acted_at: str, job_ids: str = "") -> None:
+    """Take a row's dot away until activity newer than `acted_at` arrives: record it
+    for the menu, tell the watcher (so the next response notifies afresh), and
+    dismiss the row's follow-up jobs."""
     data = load_dismissed()
     data[url] = acted_at or datetime.now(timezone.utc).isoformat()
     try:
         (state_dir() / "dismissed.json").write_text(json.dumps(data), encoding="utf-8")
     except OSError:
+        pass
+    try:
+        from watcher import followup, state
+        state.mark_cleared(url, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        for jid in filter(None, job_ids.split(",")):
+            followup.dismiss(jid)
+    except Exception:  # noqa: BLE001 — the menu must keep working without the watcher
         pass
 
 
@@ -988,13 +1003,14 @@ def main() -> int:
         fetch_and_cache(trigger_redraw=True)
         return 0
 
-    if "--dismiss-mine" in args:
-        i = args.index("--dismiss-mine")
-        rest = args[i + 1:] + ["", ""]
-        if rest[0]:
-            dismiss_mine(rest[0], rest[1])
-        trigger_refresh()
-        return 0
+    for flag in ("--dismiss", "--dismiss-mine"):
+        if flag in args:
+            i = args.index(flag)
+            rest = args[i + 1:] + ["", "", ""]
+            if rest[0]:
+                dismiss(rest[0], rest[1], rest[2])
+            trigger_refresh()
+            return 0
 
     # --- render mode: instant, from cache ---
     cache = load_cache() or {}
@@ -1008,10 +1024,11 @@ def main() -> int:
         fetching = True
 
     required = _required_approvals()
+    nick = _nicknames()
     sections = build_sections(cache if have_data else {}, _followup_jobs(), load_dismissed(),
-                              required)
+                              required, nick, prio=_priority_settings())
     render_menu(sections, spinner=fetching, error=cache.get("error"),
-                have_data=have_data, nick=_nicknames(), required=required)
+                have_data=have_data, nick=nick, required=required)
     return 0
 
 

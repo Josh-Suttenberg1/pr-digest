@@ -1,8 +1,9 @@
 """Plain-text status of every PR the menu knows about, for a Claude session to read.
 
 Written by each menu fetch to output/status/:
-  index.md         one line per PR: where the menu puts it and why
-  <repo>#<n>.md    one file per PR: section, reason, and the facts the reason rests on
+  index.md         one line per PR: where the menu puts it, its priority dot, and why
+  <repo>#<n>.md    one file per PR: section, priority (triage/priority.py), reason,
+                   and the facts the reason rests on
                    (change requests and whether you re-requested, open threads, your
                    last review, approvals, drafts and follow-up reports, with links).
                    For your own PRs it ends with "Comments to answer": the full text of
@@ -148,9 +149,9 @@ def _followup_facts(group: dict) -> list[str]:
     for job in group["jobs"]:
         where = f"{job.get('path')}:{job.get('line')}" if job.get("path") else "a thread"
         verdict = (job.get("verdict") or job["status"]).replace("_", " ")
-        facts.append(f"Your comment on {where} ({job.get('my_comment_url', '')}): "
-                     f"{job.get('actor')} moved at {local(job.get('created_at'))} "
-                     f"({job.get('trigger')}); verdict: {verdict}.")
+        facts.append(f"Your {'blocking ' if job.get('blocking') else ''}comment on {where} "
+                     f"({job.get('my_comment_url', '')}): {job.get('actor')} moved at "
+                     f"{local(job.get('created_at'))} ({job.get('trigger')}); verdict: {verdict}.")
         if job.get("report"):
             facts.append(f"  Follow-up report: {job['report']}")
         if job.get("reply_file"):
@@ -160,44 +161,58 @@ def _followup_facts(group: dict) -> list[str]:
     return facts
 
 
-MINE_WHY = {
-    "move": "your PR has a change request you haven't re-requested, an open thread, or a "
-            "comment you haven't answered",
-    "changes": "your PR has a change request standing; you re-requested the reviewer, so "
-               "it's waiting on their re-review",
-    "waiting": "your PR is waiting on reviews",
-    "approved": "your PR has enough approvals and no change request",
-}
-
-SECTIONS = ("Your PRs", "Follow-ups on your review comments", "Reviews you owe",
+SECTIONS = ("Your PRs", "Follow-ups on your reviews", "Reviews you owe",
             "Everything else (not counted)")
+
+PRIORITY_WORDS = {"red": "🔴 red (needs you now)", "yellow": "🟡 yellow (waiting a while)",
+                  "green": "🟢 green (new)"}
+
+
+def _priority(e: dict) -> str:
+    if e.get("dismissed"):
+        return "none (you dismissed it; it comes back when something new arrives)"
+    return PRIORITY_WORDS.get(e.get("color"), "none")
+
+
+def _dot(e: dict) -> str:
+    """'🔴 ' for a colored PR's index line, '' otherwise."""
+    return "" if e["priority"].startswith("none") else e["priority"].split(" ")[0] + " "
 
 
 def entries(sections: dict, data: dict, nick: dict[str, str] | None = None,
             required: int = 2) -> list[dict]:
-    """Every PR the menu shows, as {key, url, title, section, why, facts, comments}."""
+    """Every PR the menu shows, as {key, url, title, section, priority, why, facts,
+    comments}. `sections` is swiftbar_plugin.build_sections' result."""
     out: list[dict] = []
     reviews = {st.get("pr_url"): st for bucket in (data.get("reviews") or {}).values()
                for st in bucket}
 
-    for row in sections["mine"] + sections["mine_drafts"]:
-        why = MINE_WHY.get(row.get("state", ""), "your PR")
-        if row.get("dismissed"):
-            why += "; you dismissed it from the count until something new arrives"
+    def why(e: dict) -> str:
+        return e["reason"] + (f". {e['why']}" if e.get("why") else "")
+
+    for e in sections["mine"] + sections["mine_drafts"]:
+        row = e["row"]
         out.append({"url": row["url"], "title": row.get("title", ""), "section": "Your PRs",
-                    "why": why, "facts": _mine_facts(row, nick, required),
+                    "priority": _priority(e), "why": why(e),
+                    "facts": _mine_facts(row, nick, required),
                     "comments": _mine_comments(row, nick)})
-    for g in sections["followups"]:
-        pr = g["pr"]
-        url = re.sub(r"#.*$", "", g["jobs"][0].get("url", "")) or ""
-        out.append({"url": url, "title": pr.get("title", ""),
-                    "section": "Follow-ups on your review comments",
-                    "why": "follow-ups on your review comments are ready",
-                    "facts": _followup_facts(g) + (_review_facts(reviews[url])
-                                                   if url in reviews else [])})
-    for st in sections["owed"]:
+    for e in sections["followups"]:
+        url = e["url"]
+        st = e.get("st") or reviews.get(url)
+        facts = []
+        if st and st.get("rerequested_at"):
+            facts.append(f"Your review was re-requested at {local(st['rerequested_at'])} "
+                         "and you haven't reviewed since.")
+        facts += _followup_facts({"jobs": e.get("jobs") or []})
+        facts += _review_facts(st) if st else []
+        out.append({"url": url, "title": e.get("title", ""),
+                    "section": "Follow-ups on your reviews", "priority": _priority(e),
+                    "why": why(e), "facts": facts})
+    for e in sections["owed"]:
+        st = e["st"]
         out.append({"url": st["pr_url"], "title": st.get("title", ""),
-                    "section": "Reviews you owe", "why": st.get("reason", ""),
+                    "section": "Reviews you owe", "priority": _priority(e),
+                    "why": why(e) + f" (triage: {st.get('reason', '')})",
                     "facts": _review_facts(st)})
     for reason, item in sections["other"]:
         url = item.get("pr_url") or item.get("url") or ""
@@ -206,8 +221,8 @@ def entries(sections: dict, data: dict, nick: dict[str, str] | None = None,
         else:
             facts = [f"Author: {item.get('author', '?')}. Not a review candidate and not yours."]
         out.append({"url": url, "title": item.get("title", ""),
-                    "section": "Everything else (not counted)", "why": reason,
-                    "facts": facts})
+                    "section": "Everything else (not counted)", "priority": "none",
+                    "why": reason, "facts": facts})
 
     seen, unique = set(), []
     for e in out:
@@ -220,7 +235,8 @@ def entries(sections: dict, data: dict, nick: dict[str, str] | None = None,
 def render_file(e: dict, generated: str) -> str:
     lines = [f"# {e['key']} — {e['title']}", "", e["url"], "",
              f"Status as of {generated}.", "",
-             f"**Menu section:** {e['section']}", f"**Why:** {e['why']}", "", "## Facts", ""]
+             f"**Menu section:** {e['section']}", f"**Priority:** {e['priority']}",
+             f"**Why:** {e['why']}", "", "## Facts", ""]
     lines += [f"- {f}" if not f.startswith("  ") else f"  - {f.strip()}" for f in e["facts"]]
     if e.get("comments"):
         lines += ["", "## Comments to answer", ""] + e["comments"]
@@ -233,7 +249,8 @@ def render_index(es: list[dict], generated: str) -> str:
     for section in SECTIONS:
         group = [e for e in es if e["section"] == section]
         lines += [f"## {section} ({len(group)})", ""]
-        lines += [f"- [{e['key']}]({e['key']}.md) — {e['title']} — {e['why']}" for e in group]
+        lines += [f"- {_dot(e)}[{e['key']}]({e['key']}.md) — {e['title']} — {e['why']}"
+                  for e in group]
         lines.append("")
     return "\n".join(lines)
 

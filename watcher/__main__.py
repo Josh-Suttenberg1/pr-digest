@@ -2,13 +2,24 @@
 
     python -m watcher tick [--dry-run] [--since 24h]   one poll (dry-run: print, send nothing)
     python -m watcher status                           last poll, backoff, follow-ups
-    python -m watcher post <job> | dismiss <job>[,<job>…]   menu bar actions on follow-ups
+    python -m watcher post <job>[,<job>…] | dismiss <job>[,<job>…]   menu actions on follow-ups
     python -m watcher followup-run <job>               one follow-up (started by tick)
-    python -m watcher notify-test                      one alert and one banner
+    python -m watcher notify-test                      a red and a yellow alert, each with its sound
     python -m watcher install                          write and load the launchd jobs (the
                                                        watcher, and the weekly lessons refresh)
 
 The first tick with no saved state records everything as seen and sends nothing.
+
+Notifications go out per PR, not per event (`notifications`). After a tick's events,
+each PR that had any is classified through triage/priority.py: your PRs from a fresh
+triage/mine.py row, others' PRs from their follow-up jobs and any pending re-request.
+A PR notifies only when its color rises above the color it last notified at
+(`state["notified"]`), so all of a tick's events make one notification, a later event
+at the same or a lower color only updates the menu, and yellow → red pops up again.
+The stored color is dropped once the PR has no color (the row cleared: Josh answered,
+posted the drafted replies, re-reviewed) or Josh dismissed its menu row
+(state/watcher/cleared.json); the next response then notifies afresh. Uncolored
+activity, green review requests and approvals never notify.
 """
 
 from __future__ import annotations
@@ -29,6 +40,8 @@ import gh_prs  # noqa: E402
 import notify  # noqa: E402
 import settings  # noqa: E402
 from watcher import events as ev  # noqa: E402
+from triage import mine as mine_triage  # noqa: E402
+from triage import priority  # noqa: E402
 from watcher import followup, gh, render, state  # noqa: E402
 
 LABEL = "com.josh.pr-digest-watcher"
@@ -69,27 +82,87 @@ def _paths_changed(tok: str):
     return changed
 
 
-def deliver(events: list[dict], cfg: dict, dry_run: bool) -> None:
+def pr_priority(pr: dict, cfg: dict, jobs: list[dict]) -> tuple[str | None, str]:
+    """(color, reason) for one PR snapshot, through triage/priority.py. Your PRs take
+    a fresh triage/mine.py row (one gh call); others' take their open follow-up jobs
+    (`jobs`, including this tick's new responses) and any pending re-request."""
     nick = cfg.get("nicknames", {})
-    req = cfg["watcher"]["required_approvals"]
-    shown = [(e, render.render(e, nick, req)) for e in events]
-    alerts = [s for s in shown if s[1]["style"] == "alert"]
-    banners = [s for s in shown if s[1]["style"] == "banner"]
-    room = max(cfg["watcher"]["max_notifs_per_tick"] - len(alerts), 0)
-    overflow = banners[room:]
-    for e, n in alerts + banners[:room]:
-        if dry_run:
-            print(f"[{n['style']}] {n['title']}\n    {n['subtitle']}\n    {n['body']}\n    {n['href']}")
+    if pr["kind"] == "mine":
+        try:
+            row = mine_triage.row_for(cfg["org"], pr["repo"], pr["number"], pr["title"],
+                                      pr["url"], cfg["me"], set(cfg["watcher"]["bots"]))
+        except (mine_triage.GhError, KeyError, ValueError, TypeError):
+            return None, ""
+        p = priority.mine(row, nick, cfg["watcher"]["required_approvals"])
+        return p["color"], p["reason"]
+    f = priority.followup([j for j in jobs if (j.get("pr") or {}).get("id") == pr["id"]],
+                          nick, author=pr["author"],
+                          rerequested_at=ev.pending_rerequest(pr, cfg["me"]))
+    return (f["color"], f["reason"]) if f else (None, "")
+
+
+def _event_job(e: dict, now: str) -> dict:
+    """A thread event in the shape of the follow-up job it queues, so a dry run
+    classifies this tick's responses the same way as a real one."""
+    return {"id": "", "status": "queued", "created_at": now, "pr": e["pr"],
+            **{k: e.get(k) for k in ("trigger", "actor", "thread_id", "arm_id", "path",
+                                     "line", "url", "blocking")}}
+
+
+def notifications(detail: dict[str, dict], events: list[dict], jobs: list[dict],
+                  notified: dict[str, dict], cleared: dict[str, str], now: str,
+                  classify, seed: bool = False) -> list[tuple[dict, str, str, list[dict]]]:
+    """The tick's notifications, [(pr, color, reason, events)], updating `notified`
+    (PR id -> {"color", "at", "url"}) in place. `classify(pr, jobs)` gives a PR's
+    (color, reason). `seed` records every PR's color without notifying."""
+    by_pr: dict[str, list[dict]] = {}
+    for e in events:
+        by_pr.setdefault(e["pr"]["id"], []).append(e)
+    known = {j["thread_id"] for j in jobs if j.get("thread_id")}
+    extra = [_event_job(e, now) for e in events
+             if e["type"] == "thread" and e["thread_id"] not in known]
+    out = []
+    for pid, pr in detail.items():
+        pev = by_pr.get(pid, [])
+        prior = notified.get(pid)
+        if prior and (cleared.get(pr["url"]) or "") > (prior.get("at") or ""):
+            notified.pop(pid, None)
+            prior = None
+        if not pev and not prior and not seed:
             continue
-        if n["style"] == "alert":
-            notify.alert(n["title"], n["subtitle"], n["body"], href=n["href"],
-                         plugin=cfg["notify"]["swiftbar_plugin"], sound=cfg["notify"]["alert_sound"])
-        else:
-            notify.banner(n["title"], n["subtitle"], n["body"], href=n["href"], group=n["group"])
+        color, reason = classify(pr, jobs + extra)
+        if not color:
+            notified.pop(pid, None)
+            continue
+        before = (prior or {}).get("color")
+        if seed or (pev and priority.rank(color) > priority.rank(before)):
+            notified[pid] = {"color": color, "at": now, "url": pr["url"]}
+            if not seed:
+                out.append((pr, color, reason, pev))
+        elif prior and priority.rank(color) < priority.rank(before):
+            prior["color"] = color      # so a later rise notifies again
+    return out
+
+
+def deliver(notes: list[tuple[dict, str, str, list[dict]]], cfg: dict, dry_run: bool) -> None:
+    """One alert per PR, red first, with its color's sound; past max_notifs_per_tick,
+    one summary banner."""
+    nick = cfg.get("nicknames", {})
+    shown = [render.render_pr(pr, color, reason, evs, nick, pr["kind"] == "mine")
+             for pr, color, reason, evs in notes]
+    shown.sort(key=lambda n: -priority.rank(n["color"]))
+    room = cfg["watcher"]["max_notifs_per_tick"]
+    for n in shown[:room]:
+        if dry_run:
+            print(f"[{n['color']}] {n['title']}\n    {n['subtitle']}\n    {n['body']}\n    {n['href']}")
+            continue
+        notify.alert(n["title"], n["subtitle"], n["body"], href=n["href"],
+                     plugin=cfg["notify"]["swiftbar_plugin"], group=n["group"],
+                     sound_file=cfg["notify"].get(f"{n['color']}_sound"))
         _log_sent(n)
+    overflow = shown[room:]
     if overflow:
-        prs = {e["pr"]["id"] for e, _ in overflow}
-        msg = f"{len(overflow)} more updates on {len(prs)} PR{'s' if len(prs) != 1 else ''}"
+        msg = f"{len(overflow)} more PR{'s' if len(overflow) != 1 else ''} need you"
         if dry_run:
             print(f"[banner] {msg}")
         else:
@@ -108,7 +181,14 @@ def _log_sent(n: dict) -> None:
 
 
 def _notice(cfg: dict, title: str, body: str, style: str = "banner") -> None:
-    deliver([{"type": "notice", "title": title, "body": body, "style": style}], cfg, False)
+    """A watcher health notice (not about a PR)."""
+    n = render.render({"type": "notice", "title": title, "body": body, "style": style}, {})
+    if style == "alert":
+        notify.alert(n["title"], n["subtitle"], n["body"], href=n["href"],
+                     plugin=cfg["notify"]["swiftbar_plugin"], sound=cfg["notify"]["alert_sound"])
+    else:
+        notify.banner(n["title"], n["subtitle"], n["body"], href=n["href"], group=n["group"])
+    _log_sent(n)
 
 
 def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
@@ -129,7 +209,9 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
             raise gh.GhError(f"GitHub token is for {found['viewer']}, config says {me}", 401)
         replay = since is not None
         prev = {} if replay else st["prs"]
-        sweep = replay or now - (st.get("last_sweep_at") or 0) > SWEEP_EVERY
+        # The first tick that tracks notified colors records every PR's current color.
+        seed_colors = not replay and "notified" not in st
+        sweep = replay or seed_colors or now - (st.get("last_sweep_at") or 0) > SWEEP_EVERY
         todo = {pid: v["kind"] for pid, v in found["prs"].items()
                 if sweep or pid not in prev or prev[pid].get("updated_at") != v["updated_at"]
                 or prev[pid].get("head") != v["head"]}
@@ -171,14 +253,30 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
         else:
             prs[pid]["missing_ticks"] = prs[pid].get("missing_ticks", 0) + 1
 
-    deliver(events, cfg, dry_run)
+    # Follow-ups Josh has answered himself (replied, resolved, re-reviewed) stop counting.
+    jobs = followup.all_jobs()
+    answered = [c for pr in detail.values() if pr["kind"] == "others"
+                for c in followup.cleared_jobs(pr, jobs, me)]
+    gone_jobs = {jid for jid, _ in answered}
+    jobs = [j for j in jobs if j["id"] not in gone_jobs]
+    notified = {} if replay else st.get("notified", {})
+    notes = notifications(detail, events, jobs, notified, state.load_cleared(),
+                          _iso(server_now), lambda pr, js: pr_priority(pr, cfg, js),
+                          seed=seeding or seed_colors)
+    deliver(notes, cfg, dry_run)
     if dry_run:
-        print(f"-- {len(events)} event(s); {len(todo)} PR(s) fetched in detail; cutoff {cutoff}")
+        for jid, why in answered:
+            print(f"-- would clear follow-up {jid}: {why}")
+        print(f"-- {len(events)} event(s) on {len({e['pr']['id'] for e in events})} PR(s); "
+              f"{len(notes)} notification(s); {len(todo)} PR(s) fetched in detail; cutoff {cutoff}")
         return 0
 
+    for jid, why in answered:
+        followup.clear(jid, why)
     for e in events:
         if e["type"] == "thread":
             followup.enqueue(e)
+    st["notified"] = {pid: n for pid, n in notified.items() if pid in prs}
     if st["backoff"]["alerted"]:
         _notice(cfg, "✅ PR watcher reconnected", "GitHub is reachable again")
     st.update(prs=prs, last_ok_at=_iso(server_now), rate=found["rate"],
@@ -262,11 +360,16 @@ def install(cfg: dict) -> int:
 
 
 def notify_test(cfg: dict) -> int:
-    notify.alert("✅ Test alert from the PR watcher", "Stays until you close it",
-                 "Approvals, change requests and verdicts look like this",
-                 plugin=cfg["notify"]["swiftbar_plugin"], sound=cfg["notify"]["alert_sound"])
-    notify.banner("💬 Test banner from the PR watcher", "Slides away on its own",
-                  "Comments and replies look like this")
+    """A red alert, then a yellow one, each with its sound, so you can hear both."""
+    for color, title, body in (
+            ("red", "🔴 ABC-123 · Test: someone answered your blocking comment",
+             "Red: needs you now. This one stays until you close it."),
+            ("yellow", "🟡 ABC-124 · Test: someone answered your nit",
+             "Yellow: waiting a while. The softer chime.")):
+        notify.alert(title, "Test notification from the PR watcher", body,
+                     plugin=cfg["notify"]["swiftbar_plugin"],
+                     sound_file=cfg["notify"].get(f"{color}_sound"))
+        time.sleep(2)
     return 0
 
 
@@ -298,7 +401,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "install":
         return install(cfg)
     if args.cmd == "post":
-        rc = followup.post(args.job)
+        # One job id, or several joined by commas ("Post the drafted replies").
+        rc = max(followup.post(jid) for jid in args.job.split(",") if jid)
         _refresh_menu(cfg)
         return rc
     if args.cmd == "dismiss":
