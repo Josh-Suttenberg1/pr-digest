@@ -20,3 +20,6 @@ venv/
 review-drafter/state/
 review-drafter/stash/
 .DS_Store
+
+# Everything the tool writes: draft pages, the URL handler app, logs
+output/

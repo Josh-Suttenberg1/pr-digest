@@ -101,6 +101,16 @@ three sections:
 3. **Everything else** — a collapsed list of every other open PR you're involved in,
    each with the reason it isn't counted, so you can check the sorting.
 
+Review drafts and follow-up reports open as rendered pages in your browser
+(**📖 Read draft**, via `review/view_draft.py`; nothing leaves your machine). The page's
+**Discuss with Claude** button opens a Claude Code session in iTerm primed on that
+draft, once you register the `prdigest://` link handler: run `url-handler/install.sh`
+(`--remove` to undo).
+
+Each refresh also writes `output/status/`: an `index.md` and one file per PR stating
+its section, the reason, and the facts behind it, so a Claude session can start from
+them. The menu's Open in Claude items point the session at that file.
+
 The number counts sections 1 and 2. Other people's comments on PRs you haven't
 engaged with never appear. Bots (GitHub Apps, `*[bot]` logins, and the `bots` list
 in `~/.config/pr-digest/config.toml`) never count as someone waiting on you.
@@ -233,6 +243,8 @@ The tool exits non-zero with a clear message on:
 | `gh_prs.py` | Shared fetch/auth logic (used by both front-ends). |
 | `pr_digest.py` | The CLI — prints the digest and writes the dated file. |
 | `swiftbar_plugin.py` | The SwiftBar menu: fetch, sort into sections, render. |
+| `review/view_draft.py`, `url-handler/` | Draft pages in the browser + the `prdigest://` handler for Discuss with Claude. |
+| `status_report.py` | Writes `output/status/` on each menu refresh: one plain-text file per PR saying where the menu put it and why, plus `index.md`, for Claude sessions to read. |
 | `triage/` | Whose move is it: reviews you owe (`reviews.py`), your PRs waiting on you (`mine.py`). |
 | `swiftbar-plugins/prdigest.1h.sh` | SwiftBar launcher (hourly + refresh-on-open). |
 | `review-drafter/` | Review actions behind the menu's Review with Claude rows (see its README). |
@@ -242,4 +254,4 @@ The tool exits non-zero with a clear message on:
 | `requirements.txt` | `requests`, `python-dotenv`. |
 | `.env.example` | Template — copy to `.env`. |
 | `docs/` | README screenshots. |
-| `digests/`, `state/` | Generated output / menu and watcher state (git-ignored). |
+| `digests/`, `state/`, `output/` | Generated output, menu and watcher state, draft pages (git-ignored). |

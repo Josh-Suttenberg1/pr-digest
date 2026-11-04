@@ -134,12 +134,56 @@ class MineAnalyzeTest(unittest.TestCase):
         waiting = mine.analyze(pr, ME)["threads_waiting"]
         self.assertEqual([t["last_author"] for t in waiting], ["dev"])
 
+    def test_change_request_is_on_me_until_i_rerequest_the_reviewer(self):
+        review = {"author": {"login": "rev", "__typename": "User"},
+                  "state": "CHANGES_REQUESTED", "submittedAt": "2026-01-02T00:00:00Z",
+                  "body": "", "url": "r/1"}
+        pr = gql_pr(reviews=[review], decision="CHANGES_REQUESTED")
+        pr["timelineItems"] = {"nodes": [
+            {"createdAt": "2026-01-01T00:00:00Z", "requestedReviewer": {"login": "rev"}}]}
+        before = mine.analyze(pr, ME)
+        self.assertEqual([b["author"] for b in before["blockers"]], ["rev"])
+        pr["timelineItems"]["nodes"].append(
+            {"createdAt": "2026-01-03T00:00:00Z", "requestedReviewer": {"login": "rev"}})
+        after = mine.analyze(pr, ME)
+        self.assertEqual(after["blockers"], [])
+        self.assertEqual(after["answered_change_requests"][0]["rerequested_at"],
+                         "2026-01-03T00:00:00Z")
+
     def test_bot_change_request_is_not_a_blocker(self):
         review = {"author": {"login": "scanner", "__typename": "Bot"},
                   "state": "CHANGES_REQUESTED", "submittedAt": "2026-01-01T00:00:00Z",
                   "body": "", "url": "r/1"}
         pr = gql_pr(reviews=[review], decision="CHANGES_REQUESTED")
         self.assertEqual(mine.analyze(pr, ME)["blockers"], [])
+
+
+class StatusReportTest(unittest.TestCase):
+    def test_every_menu_pr_gets_a_file_and_stale_ones_go(self):
+        import tempfile
+        from pathlib import Path
+
+        import status_report
+        mine_clear = mine_row(9, False)
+        mine_clear["answered_change_requests"] = [
+            {"author": "rev", "at": "2026-01-02T00:00:00Z", "url": "r/1",
+             "rerequested_at": "2026-01-03T00:00:00Z"}]
+        data = {"me": ME, "reviews": {"needs_you": [st(1)], "author": [], "unreadable": [],
+                                      "well_approved": [st(2, reason="2 approvals")],
+                                      "done": []},
+                "mine": [mine_clear], "legacy": []}
+        sections = menu.build_sections(data, [])
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "gone#1.md").write_text("stale")
+            status_report.write(sections, data, d)
+            names = sorted(p.name for p in d.glob("*.md"))
+            self.assertEqual(names, ["api#1.md", "api#2.md", "index.md", "web#9.md"])
+            web = (d / "web#9.md").read_text()
+            self.assertIn("re-requested them at", web)
+            self.assertIn("waiting on their re-review", web)
+            self.assertIn("**Menu section:** Reviews you owe", (d / "api#1.md").read_text())
+            self.assertIn("[api#2](api#2.md)", (d / "index.md").read_text())
 
 
 class ReviewStatusTest(unittest.TestCase):

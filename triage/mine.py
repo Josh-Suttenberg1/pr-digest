@@ -4,7 +4,10 @@ For each open PR you author it surfaces:
 
   1. Unresolved review threads whose last human comment is from someone other than
      you: a discussion sitting on your side of the court.
-  2. Change-request reviews that are still the reviewer's latest review.
+  2. Change-request reviews that are still the reviewer's latest review and that you
+     haven't re-requested that reviewer after. Once you re-request them, the PR is in
+     their queue, so the change request moves to `answered_change_requests` and no
+     longer counts as waiting on you.
   3. Top-level PR comments from others newer than your most recent activity (comment
      or commit).
 
@@ -40,6 +43,9 @@ query($owner:String!,$name:String!,$num:Int!){
       }}
       reviews(first:100){nodes{author{login __typename} state submittedAt body url}}
       comments(first:100){nodes{author{login __typename} createdAt body url}}
+      timelineItems(last:100,itemTypes:[REVIEW_REQUESTED_EVENT]){nodes{
+        ... on ReviewRequestedEvent{createdAt requestedReviewer{... on User{login}}}
+      }}
     }
   }
 }
@@ -116,15 +122,26 @@ def analyze(pr: dict, me: str, bots: set[str] | frozenset = frozenset()) -> dict
         if is_bot(rv, bots):
             continue
         latest_by_author[_login(rv)] = rv  # reviews come in chronological order
-    blockers = sorted(
+    # When you last (re-)requested each reviewer.
+    rerequested: dict[str, str] = {}
+    for ev in ((pr.get("timelineItems") or {}).get("nodes") or []):
+        login = ((ev or {}).get("requestedReviewer") or {}).get("login")
+        if login:
+            rerequested[login] = max(rerequested.get(login, ""), ev.get("createdAt") or "")
+    change_requests = sorted(
         (
             {"author": a, "body": rv.get("body") or "", "at": rv["submittedAt"],
-             "url": rv.get("url", "")}
+             "url": rv.get("url", ""),
+             "rerequested_at": rerequested.get(a, "") if rerequested.get(a, "") > rv["submittedAt"] else ""}
             for a, rv in latest_by_author.items()
             if a != me and rv["state"] == "CHANGES_REQUESTED"
         ),
         key=lambda b: b["author"],
     )
+    # A change request is on you until you re-request that reviewer after it: the
+    # re-request is what puts the PR back in their queue.
+    blockers = [b for b in change_requests if not b["rerequested_at"]]
+    answered = [b for b in change_requests if b["rerequested_at"]]
 
     # Your most recent activity timestamp (last comment by you, or last commit by you).
     my_times = [c["createdAt"] for c in pr["comments"]["nodes"] if _login(c) == me]
@@ -147,6 +164,7 @@ def analyze(pr: dict, me: str, bots: set[str] | frozenset = frozenset()) -> dict
         "threads_waiting": threads_waiting,
         "changes_requested": changes_requested,
         "blockers": blockers,
+        "answered_change_requests": answered,
         "unanswered_comments": unanswered_comments,
     }
 

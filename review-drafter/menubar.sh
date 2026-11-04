@@ -145,7 +145,7 @@ case "${1:-}" in
     key="${2:-}"; idx="$REVIEWS_DIR/$key.json"; [ -f "$idx" ] || exit 0
     draft="$(jq -r '.story // .draft' "$idx")"; tkey="$(jq -r '.key' "$idx")"
     "$REPO/.venv/bin/python" "$REPO/session.py" \
-      --prompt "Let's go over the draft review for $tkey ($key): $draft"
+      --prompt "Let's go over the draft review for $tkey ($key): $draft The PR's current status is in $REPO/output/status/$key.md."
     exit 0 ;;
   --cancel)
     key="${2:-}"; [ -z "$key" ] && exit 0

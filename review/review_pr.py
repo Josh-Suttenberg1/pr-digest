@@ -316,10 +316,20 @@ def review(target: str, phase_file: Path | None, refresh_plugin: str | None,
     return write_drafts(final, meta, settings.path_of(rcfg["drafts_dir"]))
 
 
+def _page_uri(md: Path) -> str:
+    """file:// link to the draft rendered as a web page (review/view_draft.py), so a
+    notification click opens something readable; the raw markdown when rendering fails."""
+    try:
+        from review import view_draft
+        return view_draft.render(md).as_uri()
+    except Exception:  # noqa: BLE001 — a notification must still go out
+        return md.as_uri()
+
+
 def announce(records: list[dict], cfg: dict) -> None:
     for r in records:
         title_key = f"{r['key']} · {r['repo']}"
-        href = Path(r["story"] or r["draft"]).as_uri()
+        href = _page_uri(Path(r["story"] or r["draft"]))
         body = summary_line(r["counts"])
         if r["severity"] == "substantive":
             notify.alert(

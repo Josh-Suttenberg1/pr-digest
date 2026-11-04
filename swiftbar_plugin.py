@@ -200,9 +200,20 @@ def collect() -> dict:
     }
 
 
+def write_status(data: dict) -> None:
+    """Refresh output/status/ (see status_report.py) from freshly fetched data."""
+    try:
+        import status_report
+        status_report.write(build_sections(data, _followup_jobs(), load_dismissed()), data)
+    except Exception:  # noqa: BLE001 — the status files must never break the menu
+        pass
+
+
 def fetch_and_cache(trigger_redraw: bool) -> None:
     try:
-        save_cache(collect())
+        data = collect()
+        save_cache(data)
+        write_status(data)
     except Exception as exc:  # noqa: BLE001 — keep the last good data, show why
         prev = load_cache() or {}
         prev.pop("fetched_at", None)
@@ -311,8 +322,13 @@ def build_sections(data: dict, followup_jobs: list[dict],
     for row in data.get("mine") or []:
         if not row.get("waiting"):
             note = " (GitHub draft)" if row.get("isDraft") else ""
-            other.append((f"your PR, nothing waiting on you{note}",
-                          {"pr_url": row["url"], "title": row["title"]}))
+            pending = sorted({b["author"] for b in row.get("answered_change_requests") or []})
+            if pending:
+                reason = (f"your PR — you re-requested {', '.join(pending)} after their "
+                          f"change request; waiting on their re-review{note}")
+            else:
+                reason = f"your PR, nothing waiting on you{note}"
+            other.append((reason, {"pr_url": row["url"], "title": row["title"]}))
     for row in mine_hidden:
         other.append(("your PR, dismissed — comes back on new activity",
                       {"pr_url": row["url"], "title": row["title"]}))
@@ -486,8 +502,7 @@ def owed_block(st: dict) -> None:
         emit("--💬 Open in Claude", bash=str(REVIEW_MENU), param1="--open-claude",
              param2=key, terminal="false")
         if draft["path"]:
-            emit("--📄 Open draft", bash="/usr/bin/open", param1="-t", param2=draft["path"],
-                 terminal="false")
+            _read_item("--📖 Read draft", draft["path"])
     label = "🔁 Re-run the review" if draft else "🤖 Review with Claude"
     emit(f"--{label}", bash=str(REVIEW_MENU), param1="--review", param2=key,
          terminal="false", refresh="true")
@@ -519,6 +534,7 @@ def mine_block(row: dict) -> None:
     for c in row.get("unanswered_comments") or []:
         emit(f"--🗨 {c['author']}: {truncate(sanitize(c.get('body', '')), 70)}",
              href=c.get("url") or url)
+    _claude_item(f"Let's go over what's waiting on me on my PR {url}.", url)
 
 
 def when(stamp) -> str:
@@ -536,6 +552,22 @@ def when(stamp) -> str:
     if dt.date() == datetime.now().astimezone().date():
         return f"{dt:%H:%M}"
     return f"{dt:%b} {dt.day}"
+
+
+def _claude_item(prompt: str, pr_url: str) -> None:
+    """Open a Claude session primed with `prompt` plus the PR's status file, so it
+    starts from the facts rather than re-deriving them."""
+    import status_report
+    status = status_report.path_for(re.sub(r"#.*$", "", pr_url))
+    emit("--💬 Open in Claude", bash=str(REPO_DIR / ".venv" / "bin" / "python"),
+         param1=str(REPO_DIR / "session.py"), param2="--prompt",
+         param3=f"{prompt} The PR's current status is in {status}.", terminal="false")
+
+
+def _read_item(text: str, md_path: str) -> None:
+    """Open a draft or report as a rendered page in the browser (review/view_draft.py)."""
+    emit(text, bash=str(REPO_DIR / ".venv" / "bin" / "python"),
+         param1=str(REPO_DIR / "review" / "view_draft.py"), param2=md_path, terminal="false")
 
 
 def _dismiss_line(label: str, **action: str) -> None:
@@ -573,12 +605,9 @@ def _job_detail(job: dict, who: str) -> None:
          terminal="false", refresh="true")
     emit("--✏️ Edit first", bash="/usr/bin/open", param1="-t", param2=job["reply_file"],
          terminal="false")
-    emit("--💬 Open in Claude", bash=str(REPO_DIR / ".venv" / "bin" / "python"),
-         param1=str(REPO_DIR / "session.py"), param2="--prompt",
-         param3=f"Let's go over the follow-up on my review comment: {job['report']}",
-         terminal="false")
-    emit("--📄 Open report", bash="/usr/bin/open", param1="-t", param2=job["report"],
-         terminal="false")
+    _claude_item(f"Let's go over the follow-up on my review comment: {job['report']}",
+                 job["url"])
+    _read_item("--📖 Read report", job["report"])
     emit("--Dismiss this one", bash=str(WATCHER), param1="dismiss", param2=job["id"],
          terminal="false", refresh="true")
 
