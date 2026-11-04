@@ -57,7 +57,7 @@ class MinePrTests(unittest.TestCase):
         self.assertEqual((e2["actor"], e2["approvals"]), ("dknight-avetta", 2))
         n = render.render(e2, {"dknight-avetta": "DaVinci"})
         self.assertEqual((n["style"], n["title"], n["body"]),
-                         ("alert", "✅ DaVinci approved your PR", "2 of 2 approvals"))
+                         ("alert", "✅ DaVinci approved your PR · 2/2", "No comments"))
 
     def test_change_request_folds_its_inline_comments(self):
         _, st = ev.diff_pr(pr(), None, ctx(seeding=True))

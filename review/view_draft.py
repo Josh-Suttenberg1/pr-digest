@@ -14,6 +14,11 @@ handler trusts nothing in the URL except the file path: the path must resolve to
 existing .md file inside one of the draft folders (review.drafts_dir,
 watcher.reports_dir), and the prompt the Claude session starts with is built here, not
 taken from the URL.
+
+Notifications about your own PRs click through to `prdigest://respond?pr=<PR url>`,
+which opens a session on that PR's review comments (session.respond_prompt). The
+handler accepts only a pull request URL in the configured org, and again builds the
+prompt itself.
 """
 
 from __future__ import annotations
@@ -153,6 +158,21 @@ def validated_path(url: str, cfg: dict | None = None) -> Path:
     return path
 
 
+def validated_pr(url: str, cfg: dict | None = None) -> str:
+    """The PR a prdigest://respond URL points at, or ValueError when the URL isn't a
+    respond link to a pull request in the configured org."""
+    parsed = urlparse(url)
+    if parsed.scheme != SCHEME or parsed.netloc != "respond":
+        raise ValueError(f"not a {SCHEME}://respond link")
+    prs = parse_qs(parsed.query).get("pr") or []
+    if len(prs) != 1:
+        raise ValueError("expected exactly one pr=")
+    org = re.escape((cfg or settings.load())["org"])
+    if not re.fullmatch(rf"https://github\.com/{org}/[\w.-]+/pull/\d+", prs[0]):
+        raise ValueError(f"not a pull request in the configured org: {prs[0]}")
+    return prs[0]
+
+
 def prompt_for(path: Path, cfg: dict | None = None) -> str:
     if kind_of(path, cfg) == "followup":
         prompt = f"Let's go over the follow-up on my review comment: {path}"
@@ -169,11 +189,14 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--handle-url"] and len(argv) == 2:
         try:
-            path = validated_path(argv[1])
+            if urlparse(argv[1]).netloc == "respond":
+                prompt = session.respond_prompt(validated_pr(argv[1]))
+            else:
+                prompt = prompt_for(validated_path(argv[1]))
         except ValueError as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 2
-        return session.launch(prompt_for(path))
+        return session.launch(prompt)
     if len(argv) != 1:
         print(__doc__, file=sys.stderr)
         return 2

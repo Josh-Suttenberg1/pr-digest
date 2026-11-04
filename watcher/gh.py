@@ -146,11 +146,12 @@ def normalize_pr(node: dict, kind: str, bots: set[str], extra_threads: list[dict
             "body": r.get("body") or "", "url": r.get("url"),
             "author": (author or {}).get("login", ""), "is_bot": _is_bot(author, bots),
         })
-    approved_by = [
-        (n.get("author") or {}).get("login") for n in
-        (node.get("latestOpinionatedReviews") or {}).get("nodes") or []
-        if n.get("state") == "APPROVED" and not _is_bot(n.get("author"), bots)
-    ]
+    opinions = [n for n in (node.get("latestOpinionatedReviews") or {}).get("nodes") or []
+                if not _is_bot(n.get("author"), bots)]
+    approved_by = [(n.get("author") or {}).get("login") for n in opinions
+                   if n.get("state") == "APPROVED"]
+    changes_requested_by = [(n.get("author") or {}).get("login") for n in opinions
+                            if n.get("state") == "CHANGES_REQUESTED"]
     threads = [normalize_thread(t, bots)
                for t in ((node.get("reviewThreads") or {}).get("nodes") or []) + list(extra_threads)]
     return {
@@ -160,6 +161,7 @@ def normalize_pr(node: dict, kind: str, bots: set[str], extra_threads: list[dict
         "author": (node.get("author") or {}).get("login", ""),
         "head": node.get("headRefOid"), "updated_at": node.get("updatedAt"),
         "approved_by": approved_by,
+        "changes_requested_by": changes_requested_by,
         "reviews": reviews,
         "issue_comments": [_comment(c, bots) for c in (node.get("comments") or {}).get("nodes") or []],
         "threads": threads,

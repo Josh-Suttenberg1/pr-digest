@@ -1,14 +1,22 @@
 """Turn watcher events into notification text. Pure.
 
-Title says who did what, subtitle names the PR (ticket key + short title), body is
-the first line of the comment or the count, and the click opens the exact comment.
-Approvals, change requests and follow-up verdicts are alerts (they stay until
-dismissed); comments and replies are banners.
+Title says who did what, subtitle names the PR (ticket key + short title), body says
+what's left for you. Approvals, change requests and follow-up verdicts are alerts
+(they stay until dismissed); comments and replies are banners.
+
+On your own PRs an approval's title carries its place in line ("✅ Woods approved
+your PR · 2/2"), and the body counts the comments to answer by kind ("8 comments to
+answer: 3 suggestions, 5 nits") and names any change request still open, so an
+approval never reads as done while one stands. When a notification leaves you
+something to answer, clicking it opens a Claude session on the PR's comments
+(session.respond_url); otherwise it opens the review on GitHub.
 """
 
 from __future__ import annotations
 
 import re
+
+from triage import comment_kind
 
 TICKET_RE = re.compile(r"\b(?:CONN|WS)-\d+\b")
 TITLE_MAX = 40
@@ -32,6 +40,31 @@ def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
+def _answer_phrase(event: dict) -> str:
+    """'8 comments to answer: 3 suggestions, 5 nits'; '' when there are none."""
+    n = event.get("count") or 0
+    if not n:
+        return ""
+    kinds = event.get("kinds") or []
+    detail = comment_kind.phrase(kinds) if set(kinds) - {"comment"} else ""
+    return f"{_plural(n, 'comment')} to answer" + (f": {detail}" if detail else "")
+
+
+def _still_open(event: dict, nicknames: dict[str, str]) -> str:
+    """"Mykal's change request is still open"; '' when none is."""
+    names = [who(a, nicknames) for a in event.get("changes_requested_by") or []]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return f"{names[0]}'s change request is still open"
+    return f"{', '.join(names[:-1])} and {names[-1]}'s change requests are still open"
+
+
+def _respond(pr: dict) -> str:
+    import session
+    return session.respond_url(pr["url"])
+
+
 def render(event: dict, nicknames: dict[str, str], required_approvals: int = 2) -> dict:
     """{"style": alert|banner, "title", "subtitle", "body", "href", "group"}."""
     if event["type"] == "notice":
@@ -44,17 +77,23 @@ def render(event: dict, nicknames: dict[str, str], required_approvals: int = 2) 
            "group": f"pr-{pr['repo']}-{pr['number']}-{event.get('actor')}"}
     kind = event["type"]
     if kind == "decision" and event["state"] == "APPROVED":
-        extra = f" · {_plural(event['count'], 'comment')}" if event["count"] else ""
-        return {**out, "style": "alert", "title": f"✅ {name} approved your PR",
-                "body": f"{event['approvals']} of {required_approvals} approvals{extra}"}
+        answer = _answer_phrase(event)
+        body = " · ".join(x for x in (answer or "No comments", _still_open(event, nicknames)) if x)
+        return {**out, "style": "alert",
+                "title": f"✅ {name} approved your PR · {event['approvals']}/{required_approvals}",
+                "body": body, "href": _respond(pr) if answer else out["href"]}
     if kind == "decision":
-        lead = f"{_plural(event['count'], 'comment')}: " if event["count"] else ""
+        answer = _answer_phrase(event)
+        body = answer or event["first_line"] or "See the review"
         return {**out, "style": "alert", "title": f"✏️ {name} requested changes",
-                "body": f"{lead}{event['first_line']}".strip() or "See the review"}
+                "body": body, "href": _respond(pr)}
     if kind == "comments":
         title = (f"💬 {name} commented" if event["count"] <= 1
                  else f"💬 {name} left {event['count']} comments")
-        return {**out, "style": "banner", "title": title, "body": event["first_line"] or " "}
+        kinds = comment_kind.phrase(event.get("kinds") or [])
+        lead = f"{kinds} — " if event["count"] > 1 and kinds else ""
+        return {**out, "style": "banner", "title": title,
+                "body": f"{lead}{event['first_line']}".strip() or " ", "href": _respond(pr)}
     if kind == "thread":
         if event["trigger"] == "reply":
             title = f"↩️ {name} replied to your comment"

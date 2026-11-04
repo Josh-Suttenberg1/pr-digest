@@ -86,6 +86,7 @@ def deliver(events: list[dict], cfg: dict, dry_run: bool) -> None:
                          plugin=cfg["notify"]["swiftbar_plugin"], sound=cfg["notify"]["alert_sound"])
         else:
             notify.banner(n["title"], n["subtitle"], n["body"], href=n["href"], group=n["group"])
+        _log_sent(n)
     if overflow:
         prs = {e["pr"]["id"] for e, _ in overflow}
         msg = f"{len(overflow)} more updates on {len(prs)} PR{'s' if len(prs) != 1 else ''}"
@@ -93,6 +94,17 @@ def deliver(events: list[dict], cfg: dict, dry_run: bool) -> None:
             print(f"[banner] {msg}")
         else:
             notify.banner("📬 More PR activity", msg, "Open the menu bar for the list")
+            _log_sent({"style": "banner", "title": "📬 More PR activity", "subtitle": msg,
+                       "body": "", "href": None})
+
+
+def _log_sent(n: dict) -> None:
+    """One line per notification handed to macOS, on stdout, which launchd appends to
+    LOG. It records what was sent; whether macOS showed it is up to Focus and the
+    notification settings."""
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"{stamp} sent {n['style']}: {n['title']} | {n['subtitle']} | {n['body']} "
+          f"→ {n.get('href') or '-'}", flush=True)
 
 
 def _notice(cfg: dict, title: str, body: str, style: str = "banner") -> None:

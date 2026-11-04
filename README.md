@@ -89,16 +89,25 @@ GITHUB_TOKEN=ghp_xxx python3 pr_digest.py
 
 For a glanceable view instead of a file, there's a [SwiftBar](https://swiftbar.app)
 plugin: one menu-bar icon that counts only what is **your move**, with a dropdown in
-three sections:
+four sections:
 
-1. **Waiting on you** — drafted replies to your review comments (from the watcher,
-   with Post / Edit first / Open in Claude / Dismiss), and your own PRs that have a
-   change request, an open thread, or a comment you haven't answered.
-2. **Reviews you owe** — PRs requesting your review that are really on you, ranked.
+1. **Your PRs** — every open PR you author, the ones with something for you to answer
+   first. Each row leads with its state (💬 something to answer, ✏️ a change request
+   waiting on the reviewer, ⏳ waiting on reviews, ✅ approved), and a grey line under
+   it reads like `💬 8 to answer (3 suggestions, 5 nits) · ✅ 2/2 approved · ✏️ Mykal
+   requested changes, re-requested`. The submenu lists each reviewer's decision
+   (`✅ Woods approved · 2/2`, the second approval), every comment to answer tagged
+   🛑 Blocking / 💡 Suggestion / ❓ Question / 🔹 Nit and linked to its thread, and
+   **Go through these with Claude**. GitHub drafts with nothing to answer collapse
+   into one submenu.
+2. **Follow-ups on your review comments** — drafted replies to your review comments
+   (from the watcher, with Post / Edit first / Open in Claude / Dismiss), shown when
+   there are some.
+3. **Reviews you owe** — PRs requesting your review that are really on you, ranked.
    PRs with enough approvals, PRs waiting on their author, and PRs your review can't
    unblock yet (CI failing, waiting on someone else's change request) are left out.
    Each row shows its review status and a **Review with Claude** action.
-3. **Everything else** — a collapsed list of every other open PR you're involved in,
+4. **Everything else** — a collapsed list of every other open PR you're involved in,
    each with the reason it isn't counted, so you can check the sorting.
 
 Review drafts and follow-up reports open as rendered pages in your browser
@@ -111,7 +120,15 @@ Each refresh also writes `output/status/`: an `index.md` and one file per PR sta
 its section, the reason, and the facts behind it, so a Claude session can start from
 them. The menu's Open in Claude items point the session at that file.
 
-The number counts sections 1 and 2. Other people's comments on PRs you haven't
+Notifications about your own PRs say what's left for you: `✅ Woods approved your
+PR · 2/2`, with `8 comments to answer: 3 suggestions, 5 nits · Mykal's change request
+is still open` under it. When one leaves you something to answer, clicking it opens a
+Claude session on the PR's comments (a `prdigest://respond` link, so it needs the link
+handler above); otherwise it opens the review. Every notification the watcher sends
+is logged to `~/.cache/pr-digest/watcher.log`.
+
+The number counts your PRs with something to answer, follow-ups ready for you, and
+reviews you owe. Other people's comments on PRs you haven't
 engaged with never appear. Bots (GitHub Apps, `*[bot]` logins, and the `bots` list
 in `~/.config/pr-digest/config.toml`) never count as someone waiting on you.
 

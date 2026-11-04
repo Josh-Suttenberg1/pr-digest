@@ -30,6 +30,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
+from triage import comment_kind
+
 DECISIONS = ("APPROVED", "CHANGES_REQUESTED")
 
 
@@ -100,6 +102,7 @@ def _diff_mine(pr: dict, prev: dict | None, ctx: Ctx) -> tuple[list[dict], dict]
         by_actor.setdefault(item["author"], []).append(item)
 
     approvals = len(pr["approved_by"])
+    standing = pr.get("changes_requested_by") or []
     events = []
     for actor, its in by_actor.items():
         decision = next((i for i in reversed(its)
@@ -109,15 +112,21 @@ def _diff_mine(pr: dict, prev: dict | None, ctx: Ctx) -> tuple[list[dict], dict]
         base = {
             "pr": _pr_ref(pr), "actor": actor,
             "count": len(comments),
+            "kinds": [comment_kind.kind(i.get("body") or "") for i in comments],
             "first_line": _first_line(first["body"]) if first else "",
             "url": (first or its[0]).get("url") or pr["url"],
+            # Change requests still open from anyone else, so an approval never reads
+            # as "done" while one stands.
+            "changes_requested_by": [a for a in standing if a != actor],
         }
         if decision:
             # The decision's own body is the headline, not one of "its N comments".
             others = [i for i in comments if i is not decision]
             line = _first_line(decision.get("body") or "") or base["first_line"]
             events.append({**base, "type": "decision", "state": decision["state"],
-                           "approvals": approvals, "count": len(others), "first_line": line,
+                           "approvals": approvals, "count": len(others),
+                           "kinds": [comment_kind.kind(i.get("body") or "") for i in others],
+                           "first_line": line,
                            "url": decision.get("url") or base["url"]})
         elif comments:
             events.append({**base, "type": "comments"})

@@ -1,6 +1,7 @@
 """Open an interactive Claude session in a new iTerm tab.
 
-Used by the menu bar's "Open in Claude" items and by notification clicks:
+Used by the menu bar's "Open in Claude" items and by notification clicks (through
+the prdigest://respond link, see respond_url):
 
     .venv/bin/python session.py --prompt "Let's go over the draft review for ..."
 
@@ -14,6 +15,7 @@ import argparse
 import shlex
 import subprocess
 import sys
+from urllib.parse import quote
 
 import settings
 
@@ -40,6 +42,24 @@ def iterm_script(command: str) -> str:
 
 def claude_command(prompt: str, cwd: str) -> str:
     return f"cd {shlex.quote(cwd)} && claude {shlex.quote(prompt)}"
+
+
+def respond_prompt(pr_url: str) -> str:
+    """The opening prompt for working through the review comments on one of your PRs.
+    The status file holds each comment's full text, so the session starts from it."""
+    import status_report
+    return (f"Let's go through the review comments waiting on me on my PR {pr_url}. "
+            f"Every comment's full text, and who approved or requested changes, is in "
+            f"{status_report.path_for(pr_url)}; if its 'Status as of' time predates the "
+            f"newest comment, refresh with my-pr-followups.py --comments. Walk me through "
+            f"each comment with your take on it. Don't change code or post anything until "
+            f"I say.")
+
+
+def respond_url(pr_url: str) -> str:
+    """A prdigest:// link that opens a respond_prompt session; notifications use it as
+    their click target. review/view_draft.py --handle-url validates and launches it."""
+    return f"prdigest://respond?pr={quote(pr_url, safe='')}"
 
 
 def launch(prompt: str, cfg: dict | None = None, run=subprocess.run) -> int:

@@ -49,7 +49,7 @@ class BuildSectionsTest(unittest.TestCase):
         data = self.data(reviews={"needs_you": [st(1)]},
                          mine=[mine_row(5, True), mine_row(6, False)])
         s = menu.build_sections(data, jobs)
-        groups = s["waiting"]["followups"]
+        groups = s["followups"]
         self.assertEqual([g["pr"]["id"] for g in groups], ["A", "B", "C"])  # one row per PR
         self.assertEqual(groups[0]["acted_at"], "2026-01-03T00:00:00Z")      # newest move
         self.assertEqual(s["count"], 2 + 1 + 1)   # A and C; B is still running
@@ -59,12 +59,14 @@ class BuildSectionsTest(unittest.TestCase):
         row["blockers"] = [{"author": "dev", "at": "2026-01-02T00:00:00Z"}]
         data = self.data(mine=[row])
         hidden = menu.build_sections(data, [], {row["url"]: "2026-01-02T00:00:00Z"})
-        self.assertEqual(hidden["waiting"]["mine"], [])
-        self.assertEqual(hidden["count"], 0)
-        self.assertIn("dismissed", hidden["other"][0][0])
+        [listed] = hidden["mine"]                  # still listed under Your PRs ...
+        self.assertTrue(listed["dismissed"])
+        self.assertEqual(listed["state"], "changes")
+        self.assertEqual(hidden["count"], 0)       # ... but no longer counted
         row["threads_waiting"] = [{"last_author": "dev", "last_at": "2026-01-05T00:00:00Z"}]
         back = menu.build_sections(data, [], {row["url"]: "2026-01-02T00:00:00Z"})
-        self.assertEqual(back["waiting"]["mine"], [row])
+        self.assertEqual(back["mine"][0]["state"], "move")
+        self.assertEqual(back["count"], 1)
 
     def test_every_search_hit_lands_somewhere_with_a_reason(self):
         data = self.data(
@@ -84,10 +86,11 @@ class BuildSectionsTest(unittest.TestCase):
                          "GitHub draft PR — not ready for review yet")
         self.assertEqual(by_url["https://github.com/acme/api/pull/4"],
                          "not on you — matched only: assigned to you")
-        self.assertEqual(by_url["https://github.com/acme/web/pull/9"],
-                         "your PR, nothing waiting on you (GitHub draft)")
+        self.assertNotIn("https://github.com/acme/web/pull/9", by_url)   # under Your PRs
+        self.assertEqual([r["url"] for r in s["mine_drafts"]],
+                         ["https://github.com/acme/web/pull/9"])
         self.assertIn("check this", by_url["https://github.com/acme/api/pull/7"])
-        self.assertEqual(len(s["other"]), 6)   # no PR listed twice
+        self.assertEqual(len(s["other"]), 5)   # no PR listed twice
         self.assertEqual(s["count"], 0)
 
     def test_my_waiting_pr_is_not_repeated_in_everything_else(self):
@@ -176,7 +179,7 @@ class StatusReportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             (d / "gone#1.md").write_text("stale")
-            status_report.write(sections, data, d)
+            status_report.write(sections, data, directory=d)
             names = sorted(p.name for p in d.glob("*.md"))
             self.assertEqual(names, ["api#1.md", "api#2.md", "index.md", "web#9.md"])
             web = (d / "web#9.md").read_text()
