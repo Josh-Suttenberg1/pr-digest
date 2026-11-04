@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# menubar.sh — SwiftBar menu for pr-review-drafter. On-demand only.
+# menubar.sh — the review actions behind the digest menu's "Reviews you owe" rows.
 #
-# Lists every open PR that requests your review (your org). Each PR gets:
+# The digest (swiftbar_plugin.py) calls the --review, --cancel and --open-claude modes
+# and reads the inflight-/phase-/fail-<key> files they leave in state/. Nothing loads
+# this script as a SwiftBar plugin any more; its render section below (run with no
+# mode) still prints the standalone review list it was built as.
+#
+# Standalone list: every open PR that requests your review (your org). Each PR gets:
 #   -- View on GitHub          just look, costs nothing
 #   -- 🤖 Auto code review     runs drafter.sh --pr for THAT PR only
 # Claude never runs unless you click Auto code review, so no tokens burn
@@ -39,7 +44,7 @@ STATE_FILE="$ST/state.tsv"; DRAFT_LOG="$ST/drafts.tsv"; LOG="$ST/engine.log"
 CONF_DIR="${PR_REVIEW_HOME:-$HOME/.config/pr-review-drafter}"
 [ -f "$CONF_DIR/env" ] && . "$CONF_DIR/env"
 ORG="${PR_REVIEW_ORG:-}"
-PLUGIN_NAME="prreviews.30m.sh"
+PLUGIN_NAME="prdigest.1h.sh"   # the menu that shows review status; redrawn after each action
 TAB=$'\t'
 mkdir -p "$ST"
 
@@ -47,7 +52,7 @@ github_token() {
   export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-$(gh auth token 2>/dev/null)}}"
 }
 
-refresh_plugin() { open -g "swiftbar://refreshplugin?name=$PLUGIN_NAME" >/dev/null 2>&1 || true; }
+refresh_plugin() { open -g "swiftbar://refreshplugin?name=$PLUGIN_NAME&plugin=$PLUGIN_NAME" >/dev/null 2>&1 || true; }
 fmt_dur() { # seconds -> 45s / 3m05s / 1h02m
   if [ "$1" -ge 3600 ]; then printf '%dh%02dm' $(($1 / 3600)) $(($1 % 3600 / 60))
   elif [ "$1" -ge 60 ]; then printf '%dm%02ds' $(($1 / 60)) $(($1 % 60))
@@ -134,7 +139,7 @@ case "${1:-}" in
     cat "$err" >> "$LOG"; rm -f "$err"
     rm -f "$ST/inflight-$key"
     touch "$NEWDONE"
-    "$0" --fetch
+    refresh_plugin
     exit 0 ;;
   --open-claude)
     key="${2:-}"; idx="$REVIEWS_DIR/$key.json"; [ -f "$idx" ] || exit 0

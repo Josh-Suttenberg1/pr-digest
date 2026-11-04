@@ -1,13 +1,13 @@
 #!/bin/bash
 # <xbar.title>PR Digest</xbar.title>
 # <xbar.version>v1.0</xbar.version>
-# <xbar.desc>Open GitHub PRs that need your attention, with a new-activity badge.</xbar.desc>
+# <xbar.desc>The PRs that are your move: replies waiting on you, your PRs, reviews you owe.</xbar.desc>
 # <swiftbar.refreshOnOpen>true</swiftbar.refreshOnOpen>
 # <swiftbar.hideAbout>true</swiftbar.hideAbout>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 #
 # Thin launcher: runs the real plugin with the project venv, forwarding any
-# args (e.g. --mark-seen from the "Mark all as seen" menu item). All logic
+# args (e.g. --fetch from the "Refresh now" menu item). All logic
 # lives in swiftbar_plugin.py so this file rarely changes.
 #
 # Self-locating: REPO is the parent of this script's directory, so the repo

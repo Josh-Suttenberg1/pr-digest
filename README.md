@@ -3,8 +3,8 @@
 A tiny tool that fetches your open GitHub pull requests and surfaces the ones
 that need you — the PRs where you're a **requested reviewer** or the
 **assignee**. Run it from the command line for a printed digest, or drop the
-included **SwiftBar plugin** into your macOS menu bar for a glanceable count with
-a "new activity" badge.
+included **SwiftBar plugin** into your macOS menu bar for a glanceable count of
+what is your move.
 
 ## Preview
 
@@ -88,15 +88,28 @@ GITHUB_TOKEN=ghp_xxx python3 pr_digest.py
 ## Menu bar app (SwiftBar)
 
 For a glanceable view instead of a file, there's a [SwiftBar](https://swiftbar.app)
-plugin. It puts an icon in your menu bar showing a **count** of PRs needing
-attention, a **red tray badge** when something is **new or has new activity**
-since you last looked, and a dropdown of the PRs grouped by repo as **clickable
-links**.
+plugin: one menu-bar icon that counts only what is **your move**, with a dropdown in
+three sections:
+
+1. **Waiting on you** — drafted replies to your review comments (from the watcher,
+   with Post / Edit first / Open in Claude / Dismiss), and your own PRs that have a
+   change request, an open thread, or a comment you haven't answered.
+2. **Reviews you owe** — PRs requesting your review that are really on you, ranked.
+   PRs with enough approvals, PRs waiting on their author, and PRs your review can't
+   unblock yet (CI failing, waiting on someone else's change request) are left out.
+   Each row shows its review status and a **Review with Claude** action.
+3. **Everything else** — a collapsed list of every other open PR you're involved in,
+   each with the reason it isn't counted, so you can check the sorting.
+
+The number counts sections 1 and 2. Other people's comments on PRs you haven't
+engaged with never appear. Bots (GitHub Apps, `*[bot]` logins, and the `bots` list
+in `~/.config/pr-digest/config.toml`) never count as someone waiting on you.
 
 The menu **opens instantly** — it renders from a local cache, never blocking on
 the network. Opening it (and an **hourly** timer) kicks off a detached
-background fetch; the icon shows a **refresh spinner** while that runs, then the
-count and list update in place. So you get a snappy menu *and* fresh data.
+background fetch (at most every 5 minutes; a full triage takes about a minute);
+the icon shows a **refresh spinner** while that runs, then the count and list
+update in place. So you get a snappy menu *and* fresh data.
 
 ```bash
 brew install --cask swiftbar
@@ -115,52 +128,26 @@ It reuses the same `.env` token as the CLI, so no extra setup. The plugin
 (`swiftbar_plugin.py`, launched by `swiftbar-plugins/prdigest.1h.sh`) shares the
 fetch code in `gh_prs.py`.
 
-**More menu bar tools** live in the same plugin folder, so SwiftBar picks them up with no extra setup:
+The triage lives in `triage/` (`reviews.py` for reviews you owe, `mine.py` for your
+own PRs); its knobs are under `[triage]` in the config.
 
-- [`review-drafter/`](review-drafter/): auto code review. Click a PR in the menu and Claude drafts a *pending* GitHub review that only you can see. Needs a logged-in `claude` CLI.
-- [`claude-heartbeat/`](claude-heartbeat/): shows whether each Claude Code session is working, stalled, or idle. Run `claude-heartbeat/install.sh` once.
+The other menu bar tool in the plugin folder,
+[`claude-heartbeat/`](claude-heartbeat/), shows whether each Claude Code session is
+working, stalled, or idle. Run `claude-heartbeat/install.sh` once.
 
 **Reading the icon:**
 
 | Menu bar | Meaning |
 |---|---|
-| ✅ (green check) | No PRs need your attention. |
-| `3` 📥 | 3 PRs waiting; nothing new since you last opened the menu. |
-| `3` 📥 (red) | 3 PRs, and at least one is new or has fresh activity. |
+| ✅ (green check) | Nothing is your move. |
+| `3` 📥 | 3 reviews you owe. |
+| `3` 📥 (red) | 3 items, and at least one is a drafted reply or your own PR waiting on you. |
 | `3` 🔄 (spinner) | Refreshing in the background — count and list stay visible. |
 
-The red badge **persists through hourly refreshes** and clears once you **open
-the menu** (SwiftBar tells the plugin it was opened via
-`SWIFTBAR_PLUGIN_REFRESH_REASON=MenuOpen`). PRs with new activity carry a red dot
-in the list. There's a **Mark all as seen** item to clear the badge manually,
-and **Refresh now** to re-fetch on demand.
+**Refresh now** re-fetches on demand.
 
-### Comment previews
-
-Each PR row also previews its recent **comments** — conversation replies and
-inline review comments — so you can see who responded without opening GitHub:
-
-- The PR row shows the author, a **comment-count badge**, and **status glyphs**
-  — 🚧 draft, ✅ approved, ✏️ changes requested, ⚠️ merge conflicts (combined if
-  more than one applies).
-- Up to **2** recent comments appear beneath it; review comments carry a code
-  glyph, replies a reply glyph. Click one to jump straight to that comment.
-- **+n more on GitHub** opens the PR's conversation tab; PRs with none show
-  *no replies yet*.
-- Unread comments (newer than your last look) render brighter; the full text is
-  on hover.
-- **Bots are filtered out** so the preview reflects who actually replied.
-  Accounts GitHub flags as `type=Bot` (including `*[bot]` and Copilot) are
-  skipped automatically; add named bot accounts via `PR_DIGEST_IGNORE_LOGINS`
-  in `.env` (comma-separated). PRs whose only activity is bots show *no replies
-  yet*.
-
-Comments are fetched in the background per PR (`/issues/{n}/comments` +
-`/pulls/{n}/comments`) and cached, so the menu still opens instantly.
-
-State lives in `state/` (git-ignored): `seen.json` maps PR URL → last-seen
-timestamp (drives the badge + unread comments), and `cache.json` holds the last
-fetched PRs **and their comments** so the menu can draw instantly.
+State lives in `state/` (git-ignored); `cache.json` holds the last fetched triage
+so the menu can draw instantly.
 
 > The SwiftBar plugin handles the live view; it does **not** write to
 > `digests/`. The dated digest files stay the job of the CLI / launchd schedule
@@ -245,13 +232,14 @@ The tool exits non-zero with a clear message on:
 |---|---|
 | `gh_prs.py` | Shared fetch/auth logic (used by both front-ends). |
 | `pr_digest.py` | The CLI — prints the digest and writes the dated file. |
-| `swiftbar_plugin.py` | The SwiftBar menu renderer + "seen" state. |
+| `swiftbar_plugin.py` | The SwiftBar menu: fetch, sort into sections, render. |
+| `triage/` | Whose move is it: reviews you owe (`reviews.py`), your PRs waiting on you (`mine.py`). |
 | `swiftbar-plugins/prdigest.1h.sh` | SwiftBar launcher (hourly + refresh-on-open). |
-| `review-drafter/` | Auto code review menu + engine (see its README). |
+| `review-drafter/` | Review actions behind the menu's Review with Claude rows (see its README). |
 | `claude-heartbeat/` | Claude session status menu + hook (see its README). |
-| `swiftbar-plugins/prreviews.30m.sh`, `claude-heartbeat.5s.sh` | Launchers for the two tools above. |
+| `swiftbar-plugins/claude-heartbeat.5s.sh` | Launcher for the heartbeat menu. |
 | `run` | Wrapper for cron/launchd (activates venv, fixes cwd). |
 | `requirements.txt` | `requests`, `python-dotenv`. |
 | `.env.example` | Template — copy to `.env`. |
 | `docs/` | README screenshots. |
-| `digests/`, `state/` | Generated output / seen-state (git-ignored). |
+| `digests/`, `state/` | Generated output / menu and watcher state (git-ignored). |

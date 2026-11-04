@@ -138,6 +138,7 @@ def normalize(item: dict) -> dict:
         "author": (item.get("user") or {}).get("login", "unknown"),
         "url": item.get("html_url", ""),
         "age_days": age_days,
+        "draft": bool(item.get("draft")),
         # Raw ISO string; used to detect "updated since you last looked".
         "updated_at": item.get("updated_at", ""),
     }
@@ -154,10 +155,10 @@ def collect_prs(token: str) -> list[dict]:
     """Run every search and de-duplicate by PR URL. If PR_DIGEST_ONLY_ORGS is
     set, keep only PRs whose repo owner is in that allowlist."""
     by_url: dict[str, dict] = {}
-    for query in QUERIES.values():
+    for label, query in QUERIES.items():
         for item in search_prs(query, token):
             pr = normalize(item)
-            by_url.setdefault(pr["url"], pr)
+            by_url.setdefault(pr["url"], pr).setdefault("sources", []).append(label)
     prs = list(by_url.values())
     orgs = _only_orgs()
     if orgs:

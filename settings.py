@@ -46,6 +46,12 @@ DEFAULTS: dict = {
         "bots": ["copilot-pull-request-reviewer", "avettabot"],
         "reports_dir": "~/avetta/JoshWorkspace/pr_followups",
     },
+    "triage": {
+        # Authors whose PRs rank higher in the reviews-you-owe list.
+        "pod": [],
+        # Check names (case-insensitive substrings) whose failure doesn't park a PR.
+        "ci_ignored": [],
+    },
     "lessons": {
         "repos": ["processservice", "process-domain", "ui", "workerbridgeservice"],
         "days": 90,

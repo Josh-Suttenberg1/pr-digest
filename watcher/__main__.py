@@ -2,7 +2,7 @@
 
     python -m watcher tick [--dry-run] [--since 24h]   one poll (dry-run: print, send nothing)
     python -m watcher status                           last poll, backoff, follow-ups
-    python -m watcher post <job> | dismiss <job>       menu bar actions on a follow-up
+    python -m watcher post <job> | dismiss <job>[,<job>…]   menu bar actions on follow-ups
     python -m watcher followup-run <job>               one follow-up (started by tick)
     python -m watcher notify-test                      one alert and one banner
     python -m watcher install                          write and load the launchd jobs (the
@@ -290,7 +290,8 @@ def main(argv: list[str] | None = None) -> int:
         _refresh_menu(cfg)
         return rc
     if args.cmd == "dismiss":
-        rc = followup.dismiss(args.job)
+        # One job id, or several joined by commas (a PR's row dismisses all its jobs).
+        rc = max(followup.dismiss(jid) for jid in args.job.split(",") if jid)
         _refresh_menu(cfg)
         return rc
     if args.cmd == "followup-run":

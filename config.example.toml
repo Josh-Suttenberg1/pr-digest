@@ -28,6 +28,10 @@ auto_reapprove = true            # re-approve when the author did exactly what y
 bots = ["copilot-pull-request-reviewer", "avettabot"]
 reports_dir = "~/avetta/JoshWorkspace/pr_followups"
 
+[triage]                         # sorting PRs into "reviews you owe" vs everything else
+pod = []                         # GitHub logins whose PRs rank higher, e.g. ["teammate"]
+ci_ignored = []                  # check names (substrings) whose failure doesn't park a PR
+
 [lessons]
 repos = ["processservice", "process-domain", "ui", "workerbridgeservice"]
 days = 90

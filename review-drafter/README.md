@@ -61,9 +61,10 @@ Diffs over 6000 lines are skipped with a notification: review those yourself.
 
 ## Menu bar (SwiftBar) — on demand, no background token burn
 
-[menubar.sh](menubar.sh) is a SwiftBar menu, launched by
-`swiftbar-plugins/prreviews.30m.sh` in this repo. The icon shows how
-many PRs wait on your review. Each PR row has:
+The PR digest menu (`swiftbar_plugin.py`) shows the reviews you owe and runs
+these actions through [menubar.sh](menubar.sh) (`--review`, `--cancel`,
+`--open-claude`). menubar.sh is no longer a SwiftBar plugin of its own; run with no
+arguments it still prints the standalone list described here. Each PR row has:
 
 - **View on GitHub** — just look, costs nothing.
 - **🤖 Auto code review** — runs the engine for that one PR only.
@@ -108,11 +109,7 @@ GitHub rejecting the payload) does three things:
 
 The marker clears when a draft is created for that PR.
 
-To uninstall the menu item:
-
-```bash
-rm <your SwiftBar plugin folder>/prreviews.30m.sh
-```
+The review rows live in the digest menu; there is no separate menu item to remove.
 
 ## CLI
 
