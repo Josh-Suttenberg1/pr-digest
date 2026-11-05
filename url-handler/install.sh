@@ -11,7 +11,10 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-APP="$REPO/output/PRDigestLinks.app"
+# The app lives with the data; the code it runs is this copy's (an installed release's
+# `current` link when run from there).
+DATA="${PR_DIGEST_DATA:-$(cat "$REPO/.data_dir" 2>/dev/null || echo "$REPO")}"
+APP="$DATA/output/PRDigestLinks.app"
 PLIST="$APP/Contents/Info.plist"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
@@ -21,7 +24,7 @@ if [ "${1:-}" = "--remove" ]; then
   exit 0
 fi
 
-mkdir -p "$REPO/output"
+mkdir -p "$DATA/output"
 SRC="$(mktemp -t prdigest-handler).applescript"
 cat > "$SRC" <<EOF
 on open location theURL

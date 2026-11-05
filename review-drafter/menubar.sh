@@ -37,8 +37,10 @@ set -u
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 BASE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BASE/.." && pwd)"
-REVIEWS_DIR="$REPO/state/reviews"   # one <repo>#<n>.json per PR, written by bin/review-pr
-ST="$BASE/state"
+# Data lives apart from the code when running from an installed release (bin/deploy).
+DATA="${PR_DIGEST_DATA:-$(cat "$REPO/.data_dir" 2>/dev/null || echo "$REPO")}"
+REVIEWS_DIR="$DATA/state/reviews"   # one <repo>#<n>.json per PR, written by bin/review-pr
+ST="$DATA/review-drafter/state"
 MENU="$ST/menu.json"; FETCHSTAMP="$ST/fetchstamp"; NEWDONE="$ST/newdone"
 STATE_FILE="$ST/state.tsv"; DRAFT_LOG="$ST/drafts.tsv"; LOG="$ST/engine.log"
 CONF_DIR="${PR_REVIEW_HOME:-$HOME/.config/pr-review-drafter}"
@@ -145,7 +147,7 @@ case "${1:-}" in
     key="${2:-}"; idx="$REVIEWS_DIR/$key.json"; [ -f "$idx" ] || exit 0
     draft="$(jq -r '.story // .draft' "$idx")"; tkey="$(jq -r '.key' "$idx")"
     "$REPO/.venv/bin/python" "$REPO/session.py" \
-      --prompt "Let's go over the draft review for $tkey ($key): $draft The PR's current status is in $REPO/output/status/$key.md."
+      --prompt "Let's go over the draft review for $tkey ($key): $draft The PR's current status is in $DATA/output/status/$key.md."
     exit 0 ;;
   --cancel)
     key="${2:-}"; [ -z "$key" ] && exit 0

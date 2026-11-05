@@ -218,28 +218,29 @@ class NotificationTest(unittest.TestCase):
         return e
 
     def test_one_alert_per_pr_titled_with_dot_ticket_and_reason_opens_claude(self):
+        from watcher import __main__ as W
         e = self.event(snapshot(
             reviews=[w_review(1, "plaxdan", "APPROVED")],
             threads=[w_thread(11, "**Suggestion:** add a test"), w_thread(12, "**Nit:** rename")],
             approved_by=["josh-mills", "plaxdan"]))
         snap = {**snapshot(), "kind": "mine"}
+        href = W.notification_href(snap, [], {"watcher": {}}, dry_run=True)
         n = render.render_pr(snap, "red", "Woods left 2 comments (1 suggestion, 1 nit)", [e],
-                             self.NICK, mine=True)
+                             self.NICK, href)
         self.assertEqual(n["title"], "🔴 ABC-5915 · Woods left 2 comments (1 suggestion, 1 nit)")
         self.assertEqual(n["subtitle"], "Show the exact total")
         self.assertEqual(n["body"], "Woods: add a test")
         self.assertTrue(n["href"].startswith("prdigest://respond?pr="))
         self.assertEqual(view_draft.validated_pr(n["href"], {"org": "avetta"}), PR)
 
-    def test_followup_alert_opens_the_blocking_thread(self):
+    def test_followup_body_lists_each_response(self):
         pr_ref = {**snapshot(), "author": "mthomas46"}
         events = [{"type": "thread", "trigger": "reply", "actor": "mthomas46", "first_line": "ok",
                    "url": "nit-url", "blocking": False, "path": "A.elm"},
                   {"type": "thread", "trigger": "outdated", "actor": "mthomas46",
                    "first_line": "", "url": "blocking-url", "blocking": True, "path": "B.elm"}]
         n = render.render_pr(pr_ref, "red", "Mykal responded to 2 of your comments, 1 blocking",
-                             events, self.NICK, mine=False)
-        self.assertEqual(n["href"], "blocking-url")
+                             events, self.NICK, "file:///page.html")
         self.assertEqual(n["body"], "Mykal replied: ok · the code changed under your comment on B.elm")
 
 

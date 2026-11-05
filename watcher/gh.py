@@ -20,12 +20,14 @@ GRAPHQL_URL = f"{gh_prs.API_ROOT}/graphql"
 DETAIL_BATCH = 5
 
 SEARCH_QUERY = """
-query($mine: String!, $others: String!) {
+query($mine: String!, $others: String!, $mentions: String!) {
   viewer { login }
   rateLimit { cost remaining resetAt }
   mine: search(type: ISSUE, query: $mine, first: 50) {
     nodes { ... on PullRequest { id updatedAt headRefOid } } }
   others: search(type: ISSUE, query: $others, first: 50) {
+    nodes { ... on PullRequest { id updatedAt headRefOid } } }
+  mentions: search(type: ISSUE, query: $mentions, first: 50) {
     nodes { ... on PullRequest { id updatedAt headRefOid } } }
 }
 """
@@ -187,11 +189,13 @@ def search(me: str, org: str, tok: str) -> tuple[dict, str | None]:
     data, date = graphql(SEARCH_QUERY, {
         "mine": f"is:pr is:open org:{org} author:{me}",
         "others": f"is:pr is:open org:{org} reviewed-by:{me} -author:{me}",
+        # Others' PRs where someone @mentioned you, reviewed or not.
+        "mentions": f"is:pr is:open org:{org} mentions:{me} -author:{me}",
     }, tok)
     prs = {}
-    for kind in ("mine", "others"):
-        for n in (data.get(kind) or {}).get("nodes") or []:
-            if n and n.get("id"):
+    for group, kind in (("mine", "mine"), ("others", "others"), ("mentions", "others")):
+        for n in (data.get(group) or {}).get("nodes") or []:
+            if n and n.get("id") and n["id"] not in prs:
                 prs[n["id"]] = {"kind": kind, "updated_at": n.get("updatedAt"), "head": n.get("headRefOid")}
     return {"viewer": (data.get("viewer") or {}).get("login"),
             "rate": data.get("rateLimit") or {}, "prs": prs}, date

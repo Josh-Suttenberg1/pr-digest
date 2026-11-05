@@ -13,14 +13,16 @@ Every PR lands in exactly one section, with at most one color:
              suggestions count.
     no dot   waiting on reviewers, approved, or a GitHub draft with nothing to answer.
 
-  Follow-ups on your reviews (`FOLLOWUP`), others' PRs you reviewed or commented on,
-  where someone responded since your last comment:
-    red      the author re-requested your review (whatever your earlier decision), or
-             a response landed in one of your blocking threads: a reply, or the code
-             under it changed (the watcher's reply / outdated / moved triggers).
+  Follow-ups and mentions (`FOLLOWUP`), others' PRs you reviewed or commented on where
+  someone responded since your last comment, and any PR where someone @mentioned you:
+    red      someone @mentioned you; the author re-requested your review (whatever
+             your earlier decision); or a response landed in one of your blocking
+             threads: a reply, or the code under it changed (the watcher's reply /
+             outdated / moved triggers).
     yellow   the only responses are on non-blocking threads.
-  A PR you engaged with that has neither (say the author pushed commits that touch none
-  of your threads) goes to Everything else: the author is still working.
+  A PR you engaged with that has none of these (say the author pushed commits that
+  touch none of your threads, or commented without mentioning you) goes to Non action
+  requiring updates: the author is still working.
 
   Reviews you owe (`OWED`), others' PRs you haven't reviewed, or whose review of yours
   was dismissed:
@@ -30,7 +32,9 @@ Every PR lands in exactly one section, with at most one color:
              have approved or commented.
     green    everything else.
 
-  Everything else (`OTHER`), never colored: the rest, each with the reason.
+  Non action requiring updates (`OTHER`), always ⚪ low: the rest, each with the
+  reason in words (still working, waiting on the author, parked, approved, drafts).
+  Never counted and never notified.
 
 A comment of yours is blocking when comment_kind tags it blocking, or when it was part
 of a CHANGES_REQUESTED review and isn't tagged nit or suggestion (`is_blocking`).
@@ -46,13 +50,16 @@ from datetime import datetime, timezone
 
 from triage import comment_kind
 
-RED, YELLOW, GREEN = "red", "yellow", "green"
+RED, YELLOW, GREEN, LOW = "red", "yellow", "green", "low"
+# The colors the menu-bar title counts; LOW never counts and never notifies.
 COLORS = (RED, YELLOW, GREEN)
-DOTS = {RED: "🔴", YELLOW: "🟡", GREEN: "🟢"}
-LEGEND = "🔴 needs you now · 🟡 waiting a while · 🟢 new"
-_RANK = {None: 0, GREEN: 1, YELLOW: 2, RED: 3}
+DOTS = {RED: "🔴", YELLOW: "🟡", GREEN: "🟢", LOW: "⚪"}
+LEGEND = "🔴 needs you now · 🟡 waiting a while · 🟢 new · ⚪ no action needed"
+_RANK = {None: 0, LOW: 0, GREEN: 1, YELLOW: 2, RED: 3}
 
 MINE, FOLLOWUP, OWED, OTHER = "mine", "followups", "owed", "other"
+SECTION_NAMES = {MINE: "Your PRs", FOLLOWUP: "Follow-ups and mentions",
+                 OWED: "Reviews you owe", OTHER: "Non action requiring updates"}
 
 # Follow-up jobs that still stand for a response (watcher/followup.py statuses).
 ACTIVE_JOBS = ("queued", "running", "ready", "failed")
@@ -153,10 +160,11 @@ def job_blocking(job: dict) -> bool:
     return comment_kind.kind(job.get("my_comment") or "") == "blocking"
 
 
-def followup_color(blocking: list[bool], rerequested: bool) -> str | None:
-    """The follow-up rule on its own, for the watcher: red for a re-request or any
-    response in a blocking thread, yellow for responses only in non-blocking ones."""
-    if rerequested or any(blocking):
+def followup_color(blocking: list[bool], rerequested: bool,
+                   mentioned: bool = False) -> str | None:
+    """The follow-up rule on its own: red for a mention, a re-request or any response
+    in a blocking thread, yellow for responses only in non-blocking ones."""
+    if mentioned or rerequested or any(blocking):
         return RED
     return YELLOW if blocking else None
 
@@ -244,16 +252,18 @@ def mine(row: dict, nick: dict[str, str], required: int = 2,
 
 def followup(jobs: list[dict], nick: dict[str, str], *, author: str = "",
              rerequested_at: str = "", dismissed_at: str | None = None) -> dict | None:
-    """Others' PR you engaged with: the responses since your last comment (the
-    watcher's follow-up jobs for the PR, any status) and a pending re-request. None
-    when nothing has responded, so the PR isn't a follow-up."""
-    active = [j for j in jobs if j.get("status") in ACTIVE_JOBS]
-    if not active and not rerequested_at:
+    """Others' PR with something for you: the responses since your last comment and
+    the @mentions of you (the watcher's follow-up jobs for the PR, any status) and a
+    pending re-request. None when there's none of these, so it isn't a follow-up."""
+    every = [j for j in jobs if j.get("status") in ACTIVE_JOBS]
+    if not every and not rerequested_at:
         return None
-    author = author or ((active[0].get("pr") or {}).get("author") if active else "")
+    author = author or ((every[0].get("pr") or {}).get("author") if every else "")
+    mentions = [j for j in every if j.get("trigger") == "mention"]
+    active = [j for j in every if j.get("trigger") != "mention"]
     blocking = [job_blocking(j) for j in active]
-    color = followup_color(blocking, bool(rerequested_at))
-    stamps = [j.get("created_at") or "" for j in active] + [rerequested_at]
+    color = followup_color(blocking, bool(rerequested_at), bool(mentions))
+    stamps = [j.get("created_at") or "" for j in every] + [rerequested_at]
     stamps = [s for s in stamps if s]
     activity = max(stamps, default="")
 
@@ -293,6 +303,11 @@ def followup(jobs: list[dict], nick: dict[str, str], *, author: str = "",
                        + ("s" if changed > 1 else ""))
         if color == YELLOW:
             why.append("the responses are all on comments that weren't blocking")
+    if mentions:
+        who_ = names(_unique(j.get("actor") or "" for j in mentions), nick)
+        n = len(mentions)
+        parts.append(f"{who_} mentioned you" + (f" {n} times" if n > 1 else ""))
+        why.insert(0, f"{who_} mentioned you")
     reason = " · ".join(parts)
     dismissed = bool(dismissed_at and activity and activity <= dismissed_at)
     label = {RED: "red", YELLOW: "yellow"}.get(color, "")
@@ -301,7 +316,7 @@ def followup(jobs: list[dict], nick: dict[str, str], *, author: str = "",
             "why": ("You dismissed this; it comes back when something new arrives"
                     if dismissed else f"Why it's {label}: " + "; ".join(why)),
             "waiting_since": min(stamps, default=""), "activity_at": activity,
-            "dismissed": dismissed, "jobs": active}
+            "dismissed": dismissed, "jobs": every}
 
 
 # --- Reviews you owe ----------------------------------------------------------------
@@ -357,22 +372,55 @@ def parked_reason(st: dict) -> str:
     return "parked — " + ("; ".join(parked) or "your review can't unblock it yet")
 
 
-def other_reason(st: dict) -> str:
-    """Why a review candidate isn't counted."""
+def other_reason(st: dict) -> tuple[str, str, int]:
+    """Why a review candidate needs nothing from you: (words for the row, the triage's
+    detail, order inside the section). Updates where something happened come first."""
     bucket = st.get("bucket")
     reason = st.get("reason", "")
     if st.get("unreadable"):
-        return "couldn't read it from GitHub; it will be retried"
+        return "Couldn't read it from GitHub; it will be retried", reason, 7
     if bucket == "needs_you":
         if st.get("tier") == PARKED_TIER:
-            return parked_reason(st)
+            parked = [t for t in st.get("tags") or []
+                      if t.startswith("CI failing") or "approvals already" in t]
+            words = [re.sub(r"^CI failing: (.*)$", r"CI failing (\1)", t) for t in parked]
+            return ("Parked: " + ("; ".join(words) or "your review can't unblock it yet"),
+                    parked_reason(st), 2)
         if "commits landed" in reason or "pushed since" in reason:
-            return ("the author pushed commits that touch none of your comments and "
-                    "hasn't re-requested you; still working — " + reason)
-        return ("not a reply in one of your threads or a re-request — " + reason)
-    return {"author": "waiting on the author — ",
-            "well_approved": "enough approvals — ",
-            "done": "you approved — "}.get(bucket, "") + reason
+            return ("The author pushed commits that touch none of your comments", reason, 0)
+        if "commented on the PR" in reason:
+            return "The author commented, not to you", reason, 0
+        if "replied in a review" in reason:
+            return "The author replied in a review, not to you", reason, 0
+        return "Something moved, nothing aimed at you", reason, 0
+    if bucket == "author":
+        return "Waiting on the author", reason, 1
+    if bucket == "done":
+        return "You approved", reason, 3
+    if bucket == "well_approved":
+        n = len(st.get("approvals") or [])
+        return f"{n} approvals, no change requests", reason, 4
+    return reason or "Not on you", reason, 6
+
+
+def legacy(pr: dict, me: str) -> tuple[str, str, int]:
+    """The same for a PR only GitHub's searches found (not triaged): (row words,
+    detail, order)."""
+    sources = ", ".join(s.lower() for s in pr.get("sources") or []) or "search"
+    if (pr.get("author") or "").lower() == (me or "").lower():
+        return "Your PR, not triaged (check this)", f"matched: {sources}", 6
+    if pr.get("draft"):
+        return "GitHub draft, not ready for review", "GitHub draft PR", 5
+    if "Review requested" in (pr.get("sources") or []):
+        return ("Review requested but not triaged (check this)", f"matched: {sources}", 6)
+    return "Not on you", f"matched only: {sources}", 6
+
+
+def _low(base: dict, words: str, detail: str, order: int) -> dict:
+    return {**base, "section": OTHER, "color": LOW, "reason": words,
+            "why": f"Why: {detail}" if detail and detail != words else "",
+            "order": order, "waiting_since": "", "activity_at": "", "dismissed": False,
+            "jobs": []}
 
 
 # --- the whole menu ------------------------------------------------------------------
@@ -408,9 +456,7 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
             placed.add(url)
             base = {"url": url, "title": st.get("title", ""), "row": None, "st": st}
             if st.get("unreadable"):
-                out.append({**base, "section": OTHER, "color": None, "jobs": [],
-                            "reason": other_reason(st), "why": "", "waiting_since": "",
-                            "activity_at": "", "dismissed": False})
+                out.append(_low(base, *other_reason(st)))
                 continue
             f = followup(by_url.get(url, []), nick, author=st.get("author", ""),
                          rerequested_at=st.get("rerequested_at") or "",
@@ -425,9 +471,7 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
                     st, nick, now, required=required, stale_after_days=stale_after_days,
                     max_engaged=max_engaged, dismissed_at=dismissed.get(url))})
             else:
-                out.append({**base, "section": OTHER, "color": None, "jobs": [],
-                            "reason": other_reason(st), "why": "", "waiting_since": "",
-                            "activity_at": "", "dismissed": False})
+                out.append(_low(base, *other_reason(st)))
 
     # Responses on a PR the review triage didn't return (it closed between fetches, or
     # the search missed it) still show as follow-ups.
@@ -451,6 +495,14 @@ def title(entries: list[dict]) -> str:
     """The menu-bar title: '🔴2 🟡1 🟢2', omitting colors with none; '✓' when empty."""
     n = counts(entries)
     return " ".join(f"{DOTS[c]}{n[c]}" for c in COLORS if n[c]) or "✓"
+
+
+def other_entry(pr: dict, me: str) -> dict:
+    """A ⚪ entry for a PR only GitHub's searches found."""
+    url = (pr.get("url") or "").rstrip("/")
+    item = {"pr_url": url, "title": pr.get("title", ""), "author": pr.get("author", "")}
+    return _low({"url": url, "title": pr.get("title", ""), "row": None, "st": item},
+                *legacy(pr, me))
 
 
 def sort_key(entry: dict, order: int = 0) -> tuple:

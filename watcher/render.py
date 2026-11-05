@@ -7,9 +7,9 @@ A PR gets one notification per tick, at its priority color (triage/priority.py):
   subtitle  the PR title without its ticket key
   body      what happened this tick, in words ("Woods: Rename `t` to `total`")
 
-Clicking one of your PRs' notifications opens a Claude session on its comments
-(session.respond_url); a follow-up's opens the comment that was answered. Watcher
-health notices (can't reach GitHub, claude logged out) keep their own plain banners.
+The caller picks the click target (watcher/__main__.py notification_href), always
+something that already exists. Watcher health notices (can't reach GitHub, claude
+logged out) keep their own plain banners.
 """
 
 from __future__ import annotations
@@ -34,11 +34,6 @@ def subtitle(pr: dict) -> str:
     return f"{key} · {rest}" if rest else key
 
 
-def _respond(pr: dict) -> str:
-    import session
-    return session.respond_url(pr["url"])
-
-
 def _event_line(event: dict, nicknames: dict[str, str]) -> str:
     """One event in words; '' for one that adds nothing (a bare approval)."""
     name = who(event.get("actor") or "", nicknames)
@@ -56,13 +51,15 @@ def _event_line(event: dict, nicknames: dict[str, str]) -> str:
         return f"the code changed under your comment on {where}"
     if kind == "rerequest":
         return f"{name} re-requested your review"
+    if kind == "mention":
+        return f"{name} mentioned you: {line}" if line else f"{name} mentioned you"
     return ""
 
 
 def render_pr(pr: dict, color: str, reason: str, events: list[dict],
-              nicknames: dict[str, str], mine: bool) -> dict:
+              nicknames: dict[str, str], href: str) -> dict:
     """The one notification for a PR this tick: {style, color, title, subtitle, body,
-    href, group}."""
+    href, group}. `href` is chosen by the caller and always exists already."""
     from triage import priority
     key = priority.ticket(pr["title"], pr["url"])
     rest = priority.TICKET_RE.sub("", pr["title"]).strip(" []:·-")
@@ -72,12 +69,6 @@ def render_pr(pr: dict, color: str, reason: str, events: list[dict],
     body = " · ".join(dict.fromkeys(lines))
     if len(body) > 200:
         body = body[:199] + "…"
-    if mine:
-        href = _respond(pr)
-    else:
-        threads = sorted((e for e in events if e["type"] == "thread"),
-                         key=lambda e: not e.get("blocking"))
-        href = (threads[0].get("url") if threads else None) or pr["url"]
     return {"style": "alert", "color": color,
             "title": f"{priority.dot(color)} {key} · {reason}",
             "subtitle": rest or key, "body": body or " ", "href": href,

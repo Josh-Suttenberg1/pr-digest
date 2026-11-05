@@ -16,15 +16,17 @@ top explains the dots. Sections, top to bottom:
      each is, who hasn't reviewed), every comment to answer by kind and linked to its
      thread, and a Claude session to work through them. GitHub drafts with nothing to
      answer collapse into one submenu.
-  2. Follow-ups on your reviews — others' PRs you reviewed where someone responded:
-     a re-request, or replies / code changes under your comments (the watcher's
-     follow-up jobs). The submenu lists every response with its own drafted reply and
-     actions, then Post the drafted replies and the review draft's actions.
+  2. Follow-ups and mentions — others' PRs you reviewed where someone responded (a
+     re-request, or replies / code changes under your comments), and any PR where
+     someone @mentioned you; the watcher drafts a reply to each. The submenu lists
+     every response with its own drafted reply and actions, then Post the drafted
+     replies and the review draft's actions.
   3. Reviews you owe — PRs you haven't reviewed (or whose review of yours was
      dismissed), with the review draft's status and actions (run through
      review-drafter/menubar.sh, which calls bin/review-pr).
-  4. Everything else — a collapsed list of every other open PR the GitHub searches or
-     the triage turned up, each with the reason it isn't counted.
+  4. Non action requiring updates — ⚪ low priority: every other open PR the GitHub
+     searches or the triage turned up, with what happened in words (still working,
+     waiting on the author, parked, approved, drafts). Never counted.
 
 Each PR appears in exactly one section. Inside a section rows go red, yellow, green,
 then no dot. The menu-bar title counts PRs per color (`🔴2 🟡1 🟢2`), or shows ✓.
@@ -53,13 +55,19 @@ from pathlib import Path
 REPO_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_DIR))
 
+import settings  # noqa: E402
 from triage import priority  # noqa: E402
-LAUNCHER = REPO_DIR / "swiftbar-plugins" / "prdigest.1h.sh"
+
+# Menu actions run through RUN_DIR (an installed release's `current` link), so a
+# deploy switches them along with the menu; data comes from settings.DATA_DIR.
+RUN_DIR = settings.RUN_DIR
+PYTHON = str(RUN_DIR / ".venv" / "bin" / "python")
+LAUNCHER = RUN_DIR / "swiftbar-plugins" / "prdigest.1h.sh"
 PLUGIN_ID = "prdigest.1h.sh"  # unique id for swiftbar://refreshplugin
-REVIEW_MENU = REPO_DIR / "review-drafter" / "menubar.sh"   # review actions backend
-REVIEW_STATE = REPO_DIR / "review-drafter" / "state"       # inflight-/phase-/fail-<key>
-REVIEW_INDEX = REPO_DIR / "state" / "reviews"              # <repo>#<n>.json per review
-WATCHER = REPO_DIR / "bin" / "watcher"
+REVIEW_MENU = RUN_DIR / "review-drafter" / "menubar.sh"            # review actions backend
+REVIEW_STATE = settings.DATA_DIR / "review-drafter" / "state"       # inflight-/phase-/fail-<key>
+REVIEW_INDEX = settings.STATE_DIR / "reviews"                       # <repo>#<n>.json per review
+WATCHER = RUN_DIR / "bin" / "watcher"
 TITLE_MAX = 60
 
 # Refetch when the cached data is older than this (seconds). A full triage takes about
@@ -73,8 +81,10 @@ MARKER_TTL = 600
 # State: a per-plugin dir holding cache.json and the in-flight marker.
 # --------------------------------------------------------------------------- #
 def state_dir() -> Path:
-    base = os.environ.get("SWIFTBAR_PLUGIN_DATA_PATH", "").strip()
-    directory = Path(base) if base else REPO_DIR / "state"
+    """The menu's cache, in-flight marker and dismissals: state/menu under the data
+    directory, or $PR_DIGEST_MENU_DIR (for rendering against scratch data)."""
+    base = os.environ.get("PR_DIGEST_MENU_DIR", "").strip()
+    directory = Path(base) if base else settings.STATE_DIR / "menu"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
@@ -296,8 +306,8 @@ def build_sections(data: dict, followup_jobs: list[dict],
                    prio: dict | None = None) -> dict:
     """Sort cached data into the menu's sections through triage/priority.py.
 
-    Returns {"mine", "mine_drafts", "followups", "owed": [entry], "other": [(reason,
-    item)], "counts": {color: n}, "title": str, "count": int}. An entry is a
+    Returns {"mine", "mine_drafts", "followups", "owed", "other": [entry], "counts":
+    {color: n}, "title": str, "count": int}. An entry is a
     priority.classify result (url, title, section, color, reason, why, waiting_since,
     activity_at, dismissed, row | st, jobs).
 
@@ -328,27 +338,14 @@ def build_sections(data: dict, followup_jobs: list[dict],
                        key=priority.sort_key)
     owed = sorted((e for e in entries if e["section"] == priority.OWED),
                   key=lambda e: priority.sort_key(e, ranked.get(e["url"], len(ranked))))
-    other: list[tuple[str, dict]] = [(e["reason"], e["st"]) for e in entries
-                                     if e["section"] == priority.OTHER]
-
+    other = [e for e in entries if e["section"] == priority.OTHER]
     placed = {e["url"] for e in entries}
-    me = (data.get("me") or "").lower()
     for pr in data.get("legacy") or []:
         url = pr.get("url", "").rstrip("/")
-        if url in placed:
-            continue
-        placed.add(url)
-        sources = ", ".join(s.lower() for s in pr.get("sources") or []) or "search"
-        if (pr.get("author") or "").lower() == me:
-            reason = "your PR, not triaged (check this)"
-        elif pr.get("draft"):
-            reason = "GitHub draft PR — not ready for review yet"
-        elif "Review requested" in (pr.get("sources") or []):
-            reason = f"review requested but not triaged (check this) — matched: {sources}"
-        else:
-            reason = f"not on you — matched only: {sources}"
-        other.append((reason, {"pr_url": url, "title": pr.get("title", ""),
-                               "author": pr.get("author", "")}))
+        if url and url not in placed:
+            placed.add(url)
+            other.append(priority.other_entry(pr, data.get("me") or ""))
+    other.sort(key=lambda e: (e.get("order", 9), e.get("title") or ""))
 
     shown = mine_rows + followups + owed
     counts = priority.counts(shown)
@@ -403,14 +400,6 @@ def fmt_dur(seconds: float) -> str:
 def _title(item: dict) -> str:
     """A PR title without its leading ticket key."""
     return re.sub(r"^\[?[A-Z][A-Z0-9]+-\d+\]?\s*:?\s*", "", item.get("title") or "").strip()
-
-
-def _label(item: dict) -> str:
-    url = item.get("pr_url") or item.get("url") or ""
-    tickets = " ".join(item.get("tickets") or re.findall(r"\b[A-Z][A-Z0-9]+-\d+",
-                                                         item.get("title") or "")[:1])
-    lead = f"{tickets} · {_key(url)}" if tickets else _key(url)
-    return f"{lead} — {truncate(sanitize(_title(item)), 50)}"
 
 
 def _pid_alive(path: Path) -> bool:
@@ -689,15 +678,15 @@ def _respond_prompt(pr_url: str) -> str:
 
 def _claude_item(text: str, prompt: str) -> None:
     """A menu item that opens a Claude session in iTerm primed with `prompt`."""
-    emit(text, bash=str(REPO_DIR / ".venv" / "bin" / "python"),
-         param1=str(REPO_DIR / "session.py"), param2="--prompt", param3=prompt,
+    emit(text, bash=PYTHON,
+         param1=str(RUN_DIR / "session.py"), param2="--prompt", param3=prompt,
          terminal="false")
 
 
 def _read_item(text: str, md_path: str) -> None:
     """Open a draft or report as a rendered page in the browser (review/view_draft.py)."""
-    emit(text, bash=str(REPO_DIR / ".venv" / "bin" / "python"),
-         param1=str(REPO_DIR / "review" / "view_draft.py"), param2=md_path, terminal="false")
+    emit(text, bash=PYTHON,
+         param1=str(RUN_DIR / "review" / "view_draft.py"), param2=md_path, terminal="false")
 
 
 def _dismiss_line(label: str, **action: str) -> None:
@@ -709,19 +698,24 @@ def _dismiss_line(label: str, **action: str) -> None:
 def _response_text(job: dict, nick: dict[str, str]) -> str:
     """'Blocking · Types.elm:42 · Mykal replied: "Moved the check…" · addressed'."""
     from triage import comment_kind as ck
-    kind = "blocking" if priority.job_blocking(job) else ck.kind(job.get("my_comment") or "")
     where = (f"{Path(job.get('path') or '').name}" + (f":{job['line']}" if job.get("line") else "")
              if job.get("path") else "thread")
     actor = _who(job.get("actor") or "", nick)
+    state = {"ready": (job.get("verdict") or "").replace("_", " "),
+             "running": "drafting…" if job.get("trigger") == "mention" else "checking the commits…",
+             "queued": "drafting…" if job.get("trigger") == "mention" else "checking the commits…",
+             "failed": "follow-up failed"}.get(job["status"], job["status"])
+    if job.get("trigger") == "mention":
+        where = {"issue": "PR comment", "review": "review"}.get(job.get("where"), where)
+        state = "reply drafted" if job["status"] == "ready" else state
+        return f'Mention · {where} · {actor}: "{ck.summary(job.get("body") or "", 50)}" · {state}'
+    kind = "blocking" if priority.job_blocking(job) else ck.kind(job.get("my_comment") or "")
     if job.get("trigger") == "reply":
         reply = next((c["body"] for c in reversed(job.get("thread") or [])
                       if c.get("author") == job.get("actor")), "")
         what = f'{actor} replied: "{ck.summary(reply, 50)}"' if reply else f"{actor} replied"
     else:
         what = "code changed under your comment"
-    state = {"ready": (job.get("verdict") or "").replace("_", " "),
-             "running": "checking the commits…", "queued": "checking the commits…",
-             "failed": "follow-up failed"}.get(job["status"], job["status"])
     return f"{ck.WORDS.get(kind, kind)} · {where} · {what} · {state}"
 
 
@@ -731,8 +725,12 @@ def _response_detail(job: dict) -> None:
     click is your approval); "Edit first" opens it, and posting then uses whatever
     the file holds."""
     emit("----Open the thread on GitHub", href=job["url"])
-    emit(f"----Your comment: {truncate(sanitize(job.get('my_comment') or ''), 80)}",
-         color="#888888", tooltip=sanitize(job.get("my_comment") or ""))
+    if job.get("trigger") == "mention":
+        emit(f"----Their comment: {truncate(sanitize(job.get('body') or ''), 80)}",
+             color="#888888", tooltip=sanitize(job.get("body") or ""))
+    else:
+        emit(f"----Your comment: {truncate(sanitize(job.get('my_comment') or ''), 80)}",
+             color="#888888", tooltip=sanitize(job.get("my_comment") or ""))
     if job["status"] == "failed":
         emit(f"----{sanitize(job.get('error') or 'unknown error')}", color="#888888")
     if job["status"] == "ready":
@@ -763,7 +761,9 @@ def followup_block(e: dict, nick: dict[str, str]) -> None:
         emit(f"--{_who(st.get('author', ''), nick)} re-requested your review "
              f"{when(st['rerequested_at'])}", color="#888888")
     if jobs:
-        emit(f"--Responses ({len(jobs)})", color="#888888")
+        emit(f"--Responses and mentions ({len(jobs)})"
+             if any(j.get("trigger") == "mention" for j in jobs)
+             else f"--Responses ({len(jobs)})", color="#888888")
         for job in jobs:
             emit(f"--{truncate(sanitize(_response_text(job, nick)), 110)}")
             _response_detail(job)
@@ -787,6 +787,18 @@ def followup_block(e: dict, nick: dict[str, str]) -> None:
     _draft_actions(_key(url), head, url)
     emit("--Open on GitHub", href=url)
     _dismiss(e, jobs)
+
+
+def other_block(e: dict, nick: dict[str, str]) -> None:
+    """A ⚪ row: nothing for you to do; the submenu says why."""
+    url = e["url"]
+    emit(row_text(e), href=url)
+    _pr_header(e)
+    author = (e.get("st") or {}).get("author")
+    if author:
+        emit(f"--by {_who(author, nick)}", color="#888888")
+    emit("-----")
+    emit("--Open on GitHub", href=url)
 
 
 def render_menu(sections: dict, *, spinner: bool, error: str | None,
@@ -826,7 +838,7 @@ def render_menu(sections: dict, *, spinner: bool, error: str | None,
 
         if sections["followups"]:
             print("---")
-            emit("Follow-ups on your reviews", color="#888888")
+            emit(priority.SECTION_NAMES[priority.FOLLOWUP], color="#888888")
             for e in sections["followups"]:
                 followup_block(e, nick)
 
@@ -837,13 +849,11 @@ def render_menu(sections: dict, *, spinner: bool, error: str | None,
         if not sections["owed"]:
             emit("No reviews owed", color="#6b6b70")
 
-        print("---")
-        other = sections["other"]
-        emit(f"Everything else ({len(other)}), not counted")
-        for reason, item in sorted(other, key=lambda pair: pair[0]):
-            url = item.get("pr_url") or item.get("url") or ""
-            emit(f"--{_label(item)}", href=url, tooltip=sanitize(reason))
-            emit(f"--  {truncate(sanitize(reason), 100)}", color="#888888", size="11")
+        if sections["other"]:
+            print("---")
+            emit(priority.SECTION_NAMES[priority.OTHER], color="#888888")
+            for e in sections["other"]:
+                other_block(e, nick)
 
     # --- footer actions ---
     print("---")
@@ -907,7 +917,7 @@ def _followup_jobs() -> list[dict]:
 
 def watcher_label() -> str:
     """One footer line on the watcher's health, from its state file."""
-    path = REPO_DIR / "state" / "watcher" / "state.json"
+    path = settings.STATE_DIR / "watcher" / "state.json"
     try:
         st = json.loads(path.read_text())
     except (OSError, ValueError):

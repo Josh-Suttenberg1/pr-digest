@@ -20,6 +20,13 @@ The stored color is dropped once the PR has no color (the row cleared: Josh answ
 posted the drafted replies, re-reviewed) or Josh dismissed its menu row
 (state/watcher/cleared.json); the next response then notifies afresh. Uncolored
 activity, green review requests and approvals never notify.
+
+A notification only links to something that exists. Yours open a Claude session on
+the PR's comments (prdigest://respond). A follow-up or mention waits in
+`state["pending"]` until Claude's drafted replies are written (`hold_for_drafts`),
+then links to them as a rendered page; if the drafts never come (claude logged out,
+a run failing) it goes out after PENDING_MAX_MINUTES linking to the comment on
+GitHub. A re-request on its own links to the PR.
 """
 
 from __future__ import annotations
@@ -52,6 +59,10 @@ LESSONS_LABEL = "com.josh.pr-digest-lessons"
 LESSONS_PLIST = Path(f"~/Library/LaunchAgents/{LESSONS_LABEL}.plist").expanduser()
 LESSONS_LOG = Path("~/.cache/pr-digest/lessons.log").expanduser()
 SWEEP_EVERY = 900
+# How long a follow-up notification waits for its drafted replies before it goes out
+# linking to the comment on GitHub instead.
+PENDING_MAX_MINUTES = 30
+UNFINISHED = ("queued", "running")
 FIRST_SIGHT_GRACE = timedelta(minutes=5)
 
 
@@ -102,11 +113,19 @@ def pr_priority(pr: dict, cfg: dict, jobs: list[dict]) -> tuple[str | None, str]
 
 
 def _event_job(e: dict, now: str) -> dict:
-    """A thread event in the shape of the follow-up job it queues, so a dry run
-    classifies this tick's responses the same way as a real one."""
-    return {"id": "", "status": "queued", "created_at": now, "pr": e["pr"],
-            **{k: e.get(k) for k in ("trigger", "actor", "thread_id", "arm_id", "path",
-                                     "line", "url", "blocking")}}
+    """A thread or mention event in the shape of the follow-up job it queues, so a dry
+    run classifies this tick's responses the same way as a real one."""
+    return {"id": followup.event_job_id(e), "status": "queued", "created_at": now,
+            "pr": e["pr"], "trigger": "mention" if e["type"] == "mention" else e.get("trigger"),
+            **{k: e.get(k) for k in ("actor", "thread_id", "arm_id", "path", "line", "url",
+                                     "blocking", "where", "comment_id", "body", "mentioned_at")}}
+
+
+def event_jobs(events: list[dict], jobs: list[dict], now: str) -> list[dict]:
+    """Jobs for this tick's thread and mention events that aren't queued yet."""
+    known = {j["id"] for j in jobs}
+    return [_event_job(e, now) for e in events
+            if e["type"] in ("thread", "mention") and followup.event_job_id(e) not in known]
 
 
 def notifications(detail: dict[str, dict], events: list[dict], jobs: list[dict],
@@ -118,9 +137,7 @@ def notifications(detail: dict[str, dict], events: list[dict], jobs: list[dict],
     by_pr: dict[str, list[dict]] = {}
     for e in events:
         by_pr.setdefault(e["pr"]["id"], []).append(e)
-    known = {j["thread_id"] for j in jobs if j.get("thread_id")}
-    extra = [_event_job(e, now) for e in events
-             if e["type"] == "thread" and e["thread_id"] not in known]
+    extra = event_jobs(events, jobs, now)
     out = []
     for pid, pr in detail.items():
         pev = by_pr.get(pid, [])
@@ -144,12 +161,91 @@ def notifications(detail: dict[str, dict], events: list[dict], jobs: list[dict],
     return out
 
 
-def deliver(notes: list[tuple[dict, str, str, list[dict]]], cfg: dict, dry_run: bool) -> None:
+_EVENT_KEYS = ("type", "actor", "state", "first_line", "count", "trigger", "path",
+               "blocking", "url")
+
+
+def hold_for_drafts(notes: list[tuple[dict, str, str, list[dict]]], pending: dict[str, dict],
+                    jobs: list[dict], now: str, nick: dict[str, str], me: str,
+                    max_minutes: int = PENDING_MAX_MINUTES) -> list[tuple]:
+    """Which notifications go out now, as [(pr, color, reason, events, pr_jobs)].
+
+    A follow-up or mention whose drafts are still being written waits in `pending`
+    (PR id -> {pr, events, rerequested_at, since}). Each tick releases the ones whose
+    jobs have all finished, reclassified from those jobs, or that waited longer than
+    `max_minutes`; one whose row cleared meanwhile is dropped."""
+    def pr_jobs(pid: str) -> list[dict]:
+        return [j for j in jobs if (j.get("pr") or {}).get("id") == pid]
+
+    out, held_now = [], set()
+    for pr, color, reason, evs in notes:
+        js = pr_jobs(pr["id"])
+        if pr["kind"] == "others" and any(j.get("status") in UNFINISHED for j in js):
+            pending[pr["id"]] = {
+                "pr": {k: pr[k] for k in ("id", "kind", "repo", "number", "title", "url",
+                                          "author", "head")},
+                "events": [{k: e.get(k) for k in _EVENT_KEYS} for e in evs],
+                "rerequested_at": ev.pending_rerequest(pr, me) if "reviews" in pr else "",
+                "since": now}
+            held_now.add(pr["id"])
+        else:
+            out.append((pr, color, reason, evs, js))
+    for pid, p in list(pending.items()):
+        if pid in held_now:
+            continue
+        js = pr_jobs(pid)
+        waited = (datetime.fromisoformat(now.replace("Z", "+00:00"))
+                  - datetime.fromisoformat(p["since"].replace("Z", "+00:00")))
+        if any(j.get("status") in UNFINISHED for j in js) and waited < timedelta(minutes=max_minutes):
+            continue
+        pending.pop(pid)
+        f = priority.followup(js, nick, author=p["pr"]["author"],
+                              rerequested_at=p.get("rerequested_at") or "")
+        if f and f["color"]:
+            out.append((p["pr"], f["color"], f["reason"], p["events"], f["jobs"]))
+    return out
+
+
+def _report_page(pr: dict, ready: list[dict], cfg: dict) -> str:
+    """Claude's drafted replies for a PR as one rendered page (file:// URL). Several
+    reports are joined into <repo>-<n>-responses.md in the reports folder first."""
+    from review import view_draft
+    ready = sorted(ready, key=lambda j: (j.get("trigger") != "mention", not j.get("blocking")))
+    if len(ready) == 1:
+        md = Path(ready[0]["report"])
+    else:
+        md = settings.path_of(cfg["watcher"]["reports_dir"]) / f"{pr['repo']}-{pr['number']}-responses.md"
+        parts = [f"# Claude's drafted replies: {render.subtitle(pr)}", "", f"🔗 {pr['url']}", ""]
+        for j in ready:
+            parts += ["---", "", Path(j["report"]).read_text(errors="replace"), ""]
+        md.write_text("\n".join(parts))
+    return view_draft.render(md).as_uri()
+
+
+def notification_href(pr: dict, pr_jobs: list[dict], cfg: dict, dry_run: bool) -> str:
+    """Where clicking the notification goes, always somewhere that exists: your PRs
+    open a Claude session on the comments; a follow-up or mention opens Claude's
+    drafted replies; a re-request, or responses whose drafts failed, open GitHub."""
+    if pr["kind"] == "mine":
+        import session
+        return session.respond_url(pr["url"])
+    ready = [j for j in pr_jobs if j.get("status") == "ready" and j.get("report")
+             and Path(j["report"]).exists()]
+    if ready:
+        if dry_run:
+            return f"(page of Claude's drafted replies: {', '.join(j['report'] for j in ready)})"
+        return _report_page(pr, ready, cfg)
+    first = next((j.get("url") for j in pr_jobs if j.get("url")), None)
+    return first or pr["url"]
+
+
+def deliver(notes: list[tuple], cfg: dict, dry_run: bool) -> None:
     """One alert per PR, red first, with its color's sound; past max_notifs_per_tick,
-    one summary banner."""
+    one summary banner. `notes` are (pr, color, reason, events, pr_jobs)."""
     nick = cfg.get("nicknames", {})
-    shown = [render.render_pr(pr, color, reason, evs, nick, pr["kind"] == "mine")
-             for pr, color, reason, evs in notes]
+    shown = [render.render_pr(pr, color, reason, evs, nick,
+                              notification_href(pr, js, cfg, dry_run))
+             for pr, color, reason, evs, js in notes]
     shown.sort(key=lambda n: -priority.rank(n["color"]))
     room = cfg["watcher"]["max_notifs_per_tick"]
     for n in shown[:room]:
@@ -254,29 +350,40 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
             prs[pid]["missing_ticks"] = prs[pid].get("missing_ticks", 0) + 1
 
     # Follow-ups Josh has answered himself (replied, resolved, re-reviewed) stop counting.
+    now_iso = _iso(server_now)
     jobs = followup.all_jobs()
     answered = [c for pr in detail.values() if pr["kind"] == "others"
                 for c in followup.cleared_jobs(pr, jobs, me)]
     gone_jobs = {jid for jid, _ in answered}
-    jobs = [j for j in jobs if j["id"] not in gone_jobs]
+    if not dry_run:
+        for jid, why in answered:
+            followup.clear(jid, why)
+        for e in events:
+            if e["type"] == "thread":
+                followup.enqueue(e)
+            elif e["type"] == "mention":
+                followup.enqueue_mention(e)
+    jobs = [j for j in followup.all_jobs() if j["id"] not in gone_jobs]
     notified = {} if replay else st.get("notified", {})
-    notes = notifications(detail, events, jobs, notified, state.load_cleared(),
-                          _iso(server_now), lambda pr, js: pr_priority(pr, cfg, js),
-                          seed=seeding or seed_colors)
-    deliver(notes, cfg, dry_run)
+    notes = notifications(detail, events, jobs, notified, state.load_cleared(), now_iso,
+                          lambda pr, js: pr_priority(pr, cfg, js), seed=seeding or seed_colors)
+    pending = {} if replay else st.get("pending", {})
+    ready = hold_for_drafts(notes, pending, jobs + event_jobs(events, jobs, now_iso), now_iso,
+                            cfg.get("nicknames", {}), me)
+    deliver(ready, cfg, dry_run)
     if dry_run:
+        for pid, p in pending.items():
+            print(f"[{notified.get(pid, {}).get('color')} · waits for Claude's drafted replies] "
+                  f"{p['pr']['repo']}#{p['pr']['number']} · {p['pr']['title']}")
         for jid, why in answered:
             print(f"-- would clear follow-up {jid}: {why}")
         print(f"-- {len(events)} event(s) on {len({e['pr']['id'] for e in events})} PR(s); "
-              f"{len(notes)} notification(s); {len(todo)} PR(s) fetched in detail; cutoff {cutoff}")
+              f"{len(ready)} notification(s) now, {len(pending)} waiting for drafts; "
+              f"{len(todo)} PR(s) fetched in detail; cutoff {cutoff}")
         return 0
 
-    for jid, why in answered:
-        followup.clear(jid, why)
-    for e in events:
-        if e["type"] == "thread":
-            followup.enqueue(e)
     st["notified"] = {pid: n for pid, n in notified.items() if pid in prs}
+    st["pending"] = pending
     if st["backoff"]["alerted"]:
         _notice(cfg, "✅ PR watcher reconnected", "GitHub is reachable again")
     st.update(prs=prs, last_ok_at=_iso(server_now), rate=found["rate"],
@@ -324,10 +431,13 @@ def _uid() -> int:
 
 def install(cfg: dict) -> int:
     LOG.parent.mkdir(parents=True, exist_ok=True)
+    # Through RUN_DIR (an installed release's `current` link), so a deploy switches the
+    # jobs without reinstalling them.
+    python = str(settings.RUN_DIR / ".venv" / "bin" / "python")
     plist = {
         "Label": LABEL,
-        "ProgramArguments": [sys.executable, "-m", "watcher", "tick"],
-        "WorkingDirectory": str(settings.REPO_DIR),
+        "ProgramArguments": [python, "-m", "watcher", "tick"],
+        "WorkingDirectory": str(settings.RUN_DIR),
         "StartInterval": int(cfg["watcher"]["poll_interval"]),
         "RunAtLoad": True,
         "Nice": 5,
@@ -339,9 +449,9 @@ def install(cfg: dict) -> int:
     }
     lessons = {
         "Label": LESSONS_LABEL,
-        "ProgramArguments": [sys.executable, str(settings.REPO_DIR / "review" / "harvest_lessons.py"),
+        "ProgramArguments": [python, str(settings.RUN_DIR / "review" / "harvest_lessons.py"),
                              "--apply"],
-        "WorkingDirectory": str(settings.REPO_DIR),
+        "WorkingDirectory": str(settings.RUN_DIR),
         "StartCalendarInterval": {"Weekday": 1, "Hour": 7, "Minute": 0},
         "Nice": 10,
         "StandardOutPath": str(LESSONS_LOG),

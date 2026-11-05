@@ -78,7 +78,8 @@ if [ -z "$ORG" ]; then
   exit 1
 fi
 BASE="$(cd "$(dirname "$0")" && pwd)"
-STATE_DIR="$BASE/state"
+DATA="${PR_DIGEST_DATA:-$(cat "$BASE/../.data_dir" 2>/dev/null || echo "$BASE/..")}"
+STATE_DIR="$DATA/review-drafter/state"
 STATE_FILE="$STATE_DIR/state.tsv"
 DRAFT_LOG="$STATE_DIR/drafts.tsv"
 PENDING_JSON="$STATE_DIR/pending.json"

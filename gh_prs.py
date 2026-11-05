@@ -21,7 +21,9 @@ TIMEOUT = 30
 
 # This file lives in the repo root; .env sits next to it.
 REPO_DIR = Path(__file__).resolve().parent
-ENV_PATH = REPO_DIR / ".env"
+import settings  # noqa: E402
+
+ENV_PATH = settings.DATA_DIR / ".env"
 
 # The two searches that define "needs your attention".
 QUERIES = {

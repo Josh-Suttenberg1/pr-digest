@@ -79,8 +79,8 @@ class FollowupRulesTest(unittest.TestCase):
         s = st(1, commented=True, reason="you commented @abc12345, real commits landed since",
                tier=0)
         e = classify({"needs_you": [s]})[url(1)]
-        self.assertEqual((e["section"], e["color"]), (P.OTHER, None))
-        self.assertIn("still working", e["reason"])
+        self.assertEqual((e["section"], e["color"]), (P.OTHER, P.LOW))
+        self.assertEqual(e["reason"], "The author pushed commits that touch none of your comments")
 
     def test_answered_or_dismissed_jobs_no_longer_count(self):
         s = st(1, commented=True, bucket="author", reason="no new commits")
@@ -143,7 +143,7 @@ class OwedRulesTest(unittest.TestCase):
     def test_parked_first_review_is_everything_else(self):
         s = st(1, tier=P.PARKED_TIER, tags=["CI failing: build"])
         e = classify({"needs_you": [s]})[url(1)]
-        self.assertEqual((e["section"], e["reason"]), (P.OTHER, "parked — CI failing: build"))
+        self.assertEqual((e["section"], e["reason"]), (P.OTHER, "Parked: CI failing (build)"))
 
 
 def mine_row(n, waiting=False, **kw):
@@ -363,3 +363,123 @@ class SoundTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- @mentions, drafts before popups, deploy -----------------------------------------
+
+import json  # noqa: E402
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+
+class MentionTest(unittest.TestCase):
+    def test_a_mention_fires_once_and_not_inside_your_own_thread(self):
+        pr0 = wpr()
+        _, state = ev.diff_pr(pr0, None, ev.Ctx(me=ME, seeding=True))
+        ask = {"id": 50, "author": "kylerscharpen", "is_bot": False,
+               "created_at": "2026-11-04T12:00:00Z", "url": "u/50", "body": f"@{ME} is this right?"}
+        mine_thread = wthread("T1", [wc(1, ME, "why?"), wc(2, "mthomas46", f"@{ME} see above")])
+        p = wpr(issue=[ask], threads=[mine_thread])
+        events, state = ev.diff_pr(p, state, ev.Ctx(me=ME))
+        mentions = [e for e in events if e["type"] == "mention"]
+        self.assertEqual([(e["actor"], e["where"]) for e in mentions], [("kylerscharpen", "issue")])
+        again, _ = ev.diff_pr(p, state, ev.Ctx(me=ME))
+        self.assertEqual([e for e in again if e["type"] == "mention"], [])
+
+    def test_a_mention_makes_a_red_row_even_on_a_pr_you_never_reviewed(self):
+        j = {**job(1, "m1", body=""), "trigger": "mention", "actor": "kylerscharpen"}
+        e = classify({"needs_you": [st(1)]}, [j])[url(1)]
+        self.assertEqual((e["section"], e["color"], e["reason"]),
+                         (P.FOLLOWUP, P.RED, "Kyler mentioned you"))
+
+    def test_answering_a_top_level_mention_clears_it(self):
+        j = {**job(1, "m1"), "trigger": "mention", "where": "issue", "comment_id": 50,
+             "thread_id": None, "mentioned_at": "2026-11-04T12:00:00Z"}
+        j["pr"] = {**j["pr"], "id": "PR1"}
+        self.assertEqual(followup.cleared_jobs(wpr(), [j], ME), [])
+        reply = {"id": 51, "author": ME, "is_bot": False, "created_at": "2026-11-04T13:00:00Z",
+                 "url": "u/51", "body": "yes"}
+        self.assertEqual(followup.cleared_jobs(wpr(issue=[reply]), [j], ME),
+                         [("m1", "you answered the mention")])
+
+
+class HoldForDraftsTest(unittest.TestCase):
+    NOW = "2026-11-04T18:00:00Z"
+
+    def pr(self, kind="others"):
+        return {**snap("PR1", kind), "reviews": [], "issue_comments": [], "threads": []}
+
+    def jobs(self, status):
+        j = {**job(1, "j1", blocking=True, status=status), "thread_id": "T1"}
+        j["pr"] = {**j["pr"], "id": "PR1"}
+        return [j]
+
+    def test_a_followup_waits_until_its_draft_is_written(self):
+        pending = {}
+        note = (self.pr(), "red", "Mykal answered your blocking comment", [thread_ev("PR1", "T1", True)])
+        out = W.hold_for_drafts([note], pending, self.jobs("running"), self.NOW, NICK, ME)
+        self.assertEqual((out, list(pending)), ([], ["PR1"]))
+        json.dumps(pending)                       # stored in state.json
+        out = W.hold_for_drafts([], pending, self.jobs("running"), "2026-11-04T18:02:00Z", NICK, ME)
+        self.assertEqual(out, [])
+        out = W.hold_for_drafts([], pending, self.jobs("ready"), "2026-11-04T18:04:00Z", NICK, ME)
+        self.assertEqual([(p["id"], c, r) for p, c, r, _, _ in out],
+                         [("PR1", "red", "Mykal answered your blocking comment")])
+        self.assertEqual(pending, {})
+
+    def test_a_draft_that_never_comes_goes_out_after_the_wait(self):
+        pending = {}
+        note = (self.pr(), "red", "x", [thread_ev("PR1", "T1", True)])
+        W.hold_for_drafts([note], pending, self.jobs("queued"), self.NOW, NICK, ME)
+        out = W.hold_for_drafts([], pending, self.jobs("queued"), "2026-11-04T18:31:00Z", NICK, ME)
+        self.assertEqual(len(out), 1)
+
+    def test_a_row_cleared_while_waiting_is_dropped(self):
+        pending = {}
+        note = (self.pr(), "red", "x", [thread_ev("PR1", "T1", True)])
+        W.hold_for_drafts([note], pending, self.jobs("running"), self.NOW, NICK, ME)
+        self.assertEqual(W.hold_for_drafts([], pending, self.jobs("dismissed"), self.NOW, NICK, ME), [])
+
+    def test_your_own_prs_and_bare_rerequests_go_out_at_once(self):
+        note = (self.pr("mine"), "red", "Woods left 1 comment", [])
+        self.assertEqual(len(W.hold_for_drafts([note], {}, [], self.NOW, NICK, ME)), 1)
+        self.assertEqual(len(W.hold_for_drafts([(self.pr(), "red", "re-requested", [])], {}, [],
+                                               self.NOW, NICK, ME)), 1)
+
+    def test_the_link_always_exists(self):
+        cfg = {"watcher": {"reports_dir": ""}}
+        pr = self.pr()
+        self.assertEqual(W.notification_href(pr, [], cfg, True), pr["url"])
+        failed = [{**self.jobs("failed")[0], "url": "https://github.com/c/1"}]
+        self.assertEqual(W.notification_href(pr, failed, cfg, True), "https://github.com/c/1")
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "r.md"
+            report.write_text(f"# Follow-up\n\n🔗 {url(1)}\n\nDrafted reply")
+            ready = [{**self.jobs("ready")[0], "report": str(report)}]
+            from review import view_draft
+            with mock.patch.object(view_draft, "OUT_DIR", Path(tmp) / "html"):
+                href = W.notification_href(pr, ready, cfg, False)
+            self.assertTrue(href.startswith("file://"))
+            self.assertTrue(Path(href[len("file://"):]).exists())
+
+
+class DeployTest(unittest.TestCase):
+    def test_launchers_point_at_current_and_data_stays_in_the_checkout(self):
+        import deploy
+        import settings
+        with tempfile.TemporaryDirectory() as tmp:
+            release = Path(tmp) / "releases" / "abc"
+            (release / "swiftbar-plugins").mkdir(parents=True)
+            (release / "swiftbar-plugins" / "x.1h.sh").write_text(
+                '#!/bin/bash\n# <swiftbar.hideAbout>true</swiftbar.hideAbout>\n'
+                'REPO="$(cd "$(dirname "$0")/.." && pwd)"\nexec "$REPO/run" "$@"\n')
+            with mock.patch.multiple(deploy, PLUGINS=Path(tmp) / "plugins",
+                                     CURRENT=Path(tmp) / "current"):
+                deploy.write_plugins(release)
+            text = (Path(tmp) / "plugins" / "x.1h.sh").read_text()
+            self.assertIn(f'REPO="{Path(tmp) / "current"}"', text)
+            self.assertIn("<swiftbar.hideAbout>", text)
+            (release / ".data_dir").write_text("/checkout\n")
+            with mock.patch.object(settings, "REPO_DIR", release), \
+                    mock.patch.dict("os.environ", {"PR_DIGEST_DATA": ""}):
+                self.assertEqual(settings._data_dir(), Path("/checkout"))

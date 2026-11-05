@@ -1,7 +1,11 @@
-"""Follow-ups: when someone responds to Josh's review comment, check the new commits.
+"""Follow-ups: when someone responds to Josh's review comment, check the new commits;
+when someone @mentions him, draft his answer.
 
-A job is one JSON file in state/watcher/jobs/<job_id>.json, where job_id is derived
-from (thread id, Josh's comment id), so the same response never queues twice.
+A job is one JSON file in state/watcher/jobs/<job_id>.json. A response's id is derived
+from (thread id, Josh's comment id), a mention's from the mentioning item, so the same
+response or mention never queues twice. A mention job has `trigger` "mention" and
+`where` (issue comment, review body, or inline comment); its reply posts as a reply in
+the inline thread, or as a top-level comment otherwise.
 
   queued  -> running (detached `python -m watcher followup-run <job>`) -> ready | failed
   ready   -> posted (Josh clicked "Post this reply") | dismissed
@@ -84,8 +88,41 @@ Output ONLY a JSON object, no prose, no code fences:
 """
 
 
+MENTION_PROMPT = """@{actor} mentioned Josh (@{me}) on a pull request. Draft Josh's answer.
+
+PR: avetta/{repo}#{number} — {title}
+PR author: @{author}
+Where: {where}
+Their comment ({url}):
+---
+{body}
+---
+{thread}
+{clone_text}
+
+Reply rules: address @{actor} by handle, plain English, at most 4 sentences, and answer
+what they asked. Ground every claim in the code or the PR; when the answer needs Josh's
+own decision or knowledge you can't find, say in the reply that he'll follow up, and
+never invent facts. No bare acceptance-criteria labels. Don't add a signature.
+
+Output ONLY a JSON object, no prose, no code fences:
+{{"summary": "<one line: what they asked or told Josh>", "reply": "..."}}
+"""
+
+
 def job_id(thread_id: str, arm_id: int) -> str:
     return hashlib.sha1(f"{thread_id}:{arm_id}".encode()).hexdigest()[:12]
+
+
+def mention_job_id(where: str, comment_id: int) -> str:
+    return hashlib.sha1(f"mention:{where}:{comment_id}".encode()).hexdigest()[:12]
+
+
+def event_job_id(event: dict) -> str:
+    """The id of the job an event queues."""
+    if event["type"] == "mention":
+        return mention_job_id(event["where"], event["comment_id"])
+    return job_id(event["thread_id"], event["arm_id"])
 
 
 def job_path(jid: str) -> Path:
@@ -126,6 +163,22 @@ def enqueue(event: dict) -> str | None:
     return jid
 
 
+def enqueue_mention(event: dict) -> str | None:
+    """Queue a drafted answer to an @mention; None when this one already has one."""
+    jid = mention_job_id(event["where"], event["comment_id"])
+    if job_path(jid).exists():
+        return None
+    save_job({
+        "id": jid, "status": "queued", "trigger": "mention",
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        **{k: event.get(k) for k in ("actor", "where", "comment_id", "thread_id", "root_id",
+                                     "path", "line", "body", "thread", "url",
+                                     "mentioned_at", "head")},
+        "my_comment": "", "blocking": False, "pr": event["pr"],
+    })
+    return jid
+
+
 CLEARABLE = ("queued", "ready", "failed")
 
 
@@ -146,6 +199,17 @@ def cleared_jobs(pr: dict, jobs: list[dict], me: str) -> list[tuple[str, str]]:
                             or (r["state"] == "COMMENTED" and (r.get("body") or "").strip()))
                        for r in pr["reviews"])
         t = threads.get(job.get("thread_id"))
+        if job.get("trigger") == "mention":
+            after = job.get("mentioned_at") or since
+            answered = (any(c["author"] == me and c["id"] > job.get("comment_id", 0)
+                            for c in (t or {}).get("comments", [])) if t else
+                        any(c["author"] == me and (c.get("created_at") or "") > after
+                            for c in pr["issue_comments"])
+                        or any(r["author"] == me and (r.get("submitted_at") or "") > after
+                               and (r.get("body") or "").strip() for r in pr["reviews"]))
+            if answered or reviewed:
+                out.append((job["id"], "you answered the mention"))
+            continue
         if reviewed:
             out.append((job["id"], "you submitted a new review"))
         elif t and t["resolved"]:
@@ -356,6 +420,47 @@ def reapprove(job: dict, shas: list[str]) -> str | None:
     return proc.stdout.strip() if proc.returncode == 0 else None
 
 
+def build_mention_prompt(job: dict, clone: Path, me: str) -> str:
+    pr = job["pr"]
+    where = {"issue": "a top-level comment on the PR", "review": "a review's body",
+             "inline": f"an inline comment on {job.get('path')}"
+                       + (f":{job['line']}" if job.get("line") else "")}[job["where"]]
+    thread = ""
+    if job.get("thread"):
+        thread = "The thread, in order:\n" + "\n".join(
+            f"- @{c['author']}: {c['body'][:1500]}" for c in job["thread"])
+    clone_text = "(no local clone of this repo; answer from the comment and the thread)"
+    if (clone / ".git").exists():
+        _git(clone, "fetch", "-q", "--no-write-fetch-head", "origin", f"pull/{pr['number']}/head")
+        clone_text = (f"The clone is at {clone}; the PR head is {str(job.get('head') or '')[:12]}. "
+                      f"You may read with `git -C {clone} show|log|diff` at that commit.")
+    return MENTION_PROMPT.format(
+        actor=job["actor"], me=me, repo=pr["repo"], number=pr["number"], title=pr["title"],
+        author=pr["author"], where=where, url=job.get("url") or "", body=job.get("body") or "",
+        thread=thread, clone_text=clone_text)
+
+
+def parse_mention_result(text: str) -> dict:
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("no JSON object in the result")
+    data = json.loads(text[start:end + 1])
+    if not str(data.get("reply") or "").strip():
+        raise ValueError("empty reply")
+    return {"verdict": "mention", "mechanical": False, "evidence": [],
+            "summary": str(data.get("summary") or "").strip(), "reply": data["reply"]}
+
+
+def mention_report(job: dict, result: dict) -> str:
+    pr = job["pr"]
+    quoted = "\n".join(f"> {ln}" for ln in (job.get("body") or "").splitlines())
+    return "\n".join([
+        f"# Mention: {render.subtitle(pr)}", "", f"🔗 {pr['url']}",
+        f"Their comment: {job.get('url') or ''}", "",
+        f"**@{job['actor']} asked:** {result.get('summary') or ''}", "", quoted, "",
+        "## Drafted reply", "", with_footer(result["reply"]), ""])
+
+
 def with_footer(reply: str) -> str:
     reply = reply.strip()
     return reply if reply.endswith(FOOTER) else f"{reply}\n\n{FOOTER}"
@@ -387,12 +492,19 @@ def run(jid: str, cfg: dict | None = None) -> int:
     clone = settings.path_of(cfg["repos_root"]) / pr["repo"]
     reports = settings.path_of(cfg["watcher"]["reports_dir"])
     reports.mkdir(parents=True, exist_ok=True)
-    stem = reports / f"{pr['repo']}-{pr['number']}-{job['root_id']}-{job['arm_id']}"
+    mention = job.get("trigger") == "mention"
+    if mention:
+        stem = reports / f"{pr['repo']}-{pr['number']}-mention-{job['comment_id']}"
+    else:
+        stem = reports / f"{pr['repo']}-{pr['number']}-{job['root_id']}-{job['arm_id']}"
     try:
-        if not (clone / ".git").exists():
+        if mention:
+            prompt = build_mention_prompt(job, clone, cfg["me"])
+        elif not (clone / ".git").exists():
             raise RuntimeError(f"no local clone at {clone}")
-        rng = collect_range(clone, pr["number"], job["arm_commit"], job["head"], job["path"])
-        prompt = build_prompt(job, rng, clone)
+        else:
+            rng = collect_range(clone, pr["number"], job["arm_commit"], job["head"], job["path"])
+            prompt = build_prompt(job, rng, clone)
         job["prompt_sha256"] = hashlib.sha256(prompt.encode()).hexdigest()
         argv = ["claude", "-p", "--model", cfg["models"]["followup"], "--output-format", "json",
                 "--permission-mode", "dontAsk",
@@ -407,14 +519,14 @@ def run(jid: str, cfg: dict | None = None) -> int:
         envelope = json.loads(proc.stdout or "{}")
         if envelope.get("is_error") or not envelope.get("result"):
             raise RuntimeError(f"claude failed: {str(envelope.get('result') or proc.stderr)[:200]}")
-        result = parse_result(envelope["result"])
+        result = (parse_mention_result if mention else parse_result)(envelope["result"])
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
         job.update(status="failed", error=str(exc)[:300])
         save_job(job)
         notify.banner("⚠️ Follow-up failed", render.subtitle(pr), str(exc)[:200], href=job["url"])
         return 1
 
-    stem.with_suffix(".md").write_text(report_markdown(job, result))
+    stem.with_suffix(".md").write_text((mention_report if mention else report_markdown)(job, result))
     reply_path = stem.with_name(stem.name + ".reply.md")
     reply_path.write_text(with_footer(result["reply"]) + "\n")
     stem.with_suffix(".json").write_text(json.dumps({**result, "job": jid}, indent=2) + "\n")
@@ -422,6 +534,9 @@ def run(jid: str, cfg: dict | None = None) -> int:
                report=str(stem.with_suffix(".md")),
                reply_file=str(reply_path), cost_usd=envelope.get("total_cost_usd"),
                finished_at=int(time.time()))
+    if mention:
+        save_job(job)
+        return 0
     shas, why = reapproval_plan(job, result, cfg, clone)
     job["reapproval"] = why
     if shas:
@@ -462,10 +577,12 @@ def post(jid: str) -> int:
     digest = hashlib.sha256(text.encode()).hexdigest()
     if job.get("posted_sha256") == digest:
         return 0
+    if job.get("root_id"):     # a reply in the inline thread
+        endpoint = f"repos/avetta/{pr['repo']}/pulls/{pr['number']}/comments/{job['root_id']}/replies"
+    else:                      # a mention in a top-level comment or a review body
+        endpoint = f"repos/avetta/{pr['repo']}/issues/{pr['number']}/comments"
     proc = subprocess.run(
-        ["gh", "api", "-X", "POST",
-         f"repos/avetta/{pr['repo']}/pulls/{pr['number']}/comments/{job['root_id']}/replies",
-         "-F", f"body=@{reply_file}", "--jq", ".html_url"],
+        ["gh", "api", "-X", "POST", endpoint, "-F", f"body=@{reply_file}", "--jq", ".html_url"],
         capture_output=True, text=True,
     )
     if proc.returncode != 0:

@@ -41,8 +41,8 @@ class BuildSectionsTest(unittest.TestCase):
                                                                  parked]}), [])
         self.assertEqual([e["url"] for e in s["owed"]], [st(1)["pr_url"]])
         self.assertEqual(s["count"], 1)
-        reasons = [r for r, _ in s["other"]]
-        self.assertEqual(reasons, ["parked — CI failing: build"])
+        self.assertEqual([(e["color"], e["reason"]) for e in s["other"]],
+                         [("low", "Parked: CI failing (build)")])
 
     def test_followups_are_one_row_per_pr_and_only_open_jobs_count(self):
         def job(pr_id, status, at="2026-01-01T00:00:00Z"):
@@ -88,21 +88,23 @@ class BuildSectionsTest(unittest.TestCase):
                     legacy(4, sources=("Assigned to you",)),
                     legacy(9, author=ME, repo="web"), legacy(7)])
         s = menu.build_sections(data, [])
-        by_url = {item.get("pr_url"): reason for reason, item in s["other"]}
+        by_url = {e["url"]: e["reason"] for e in s["other"]}
         self.assertEqual(by_url["https://github.com/acme/api/pull/1"],
-                         "enough approvals — 2 approvals, no change requests")
-        self.assertEqual(by_url["https://github.com/acme/api/pull/2"],
-                         "waiting on the author — you commented; no new commits")
+                         "0 approvals, no change requests")
+        self.assertEqual(by_url["https://github.com/acme/api/pull/2"], "Waiting on the author")
         self.assertEqual(by_url["https://github.com/acme/api/pull/3"],
-                         "GitHub draft PR — not ready for review yet")
-        self.assertEqual(by_url["https://github.com/acme/api/pull/4"],
-                         "not on you — matched only: assigned to you")
+                         "GitHub draft, not ready for review")
+        self.assertEqual(by_url["https://github.com/acme/api/pull/4"], "Not on you")
         self.assertNotIn("https://github.com/acme/web/pull/9", by_url)   # under Your PRs
-        self.assertEqual([r["url"] for r in s["mine_drafts"]],
+        self.assertEqual([e["url"] for e in s["mine_drafts"]],
                          ["https://github.com/acme/web/pull/9"])
         self.assertIn("check this", by_url["https://github.com/acme/api/pull/7"])
         self.assertEqual(len(s["other"]), 5)   # no PR listed twice
+        self.assertTrue(all(e["color"] == "low" for e in s["other"]))
         self.assertEqual(s["count"], 0)
+        self.assertEqual(s["title"], "✓")    # ⚪ rows never count
+        self.assertEqual([e["reason"] for e in s["other"]][:2],
+                         ["Waiting on the author", "0 approvals, no change requests"])
 
     def test_my_waiting_pr_is_not_repeated_in_everything_else(self):
         data = self.data(mine=[mine_row(9, True)], legacy=[legacy(9, author=ME, repo="web")])

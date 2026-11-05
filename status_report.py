@@ -20,8 +20,9 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-REPO_DIR = Path(__file__).resolve().parent
-STATUS_DIR = REPO_DIR / "output" / "status"
+import settings
+
+STATUS_DIR = settings.OUTPUT_DIR / "status"
 
 
 def key_of(url: str) -> str:
@@ -147,6 +148,12 @@ def _mine_comments(row: dict, nick: dict[str, str] | None = None) -> list[str]:
 def _followup_facts(group: dict) -> list[str]:
     facts = []
     for job in group["jobs"]:
+        if job.get("trigger") == "mention":
+            facts.append(f"{job.get('actor')} mentioned you at {local(job.get('mentioned_at'))} "
+                         f"({job.get('url', '')}); status: {job['status']}.")
+            if job.get("reply_file"):
+                facts.append(f"  Drafted reply: {job['reply_file']}")
+            continue
         where = f"{job.get('path')}:{job.get('line')}" if job.get("path") else "a thread"
         verdict = (job.get("verdict") or job["status"]).replace("_", " ")
         facts.append(f"Your {'blocking ' if job.get('blocking') else ''}comment on {where} "
@@ -161,11 +168,12 @@ def _followup_facts(group: dict) -> list[str]:
     return facts
 
 
-SECTIONS = ("Your PRs", "Follow-ups on your reviews", "Reviews you owe",
-            "Everything else (not counted)")
+from triage import priority as P  # noqa: E402
+
+SECTIONS = tuple(P.SECTION_NAMES[s] for s in (P.MINE, P.FOLLOWUP, P.OWED, P.OTHER))
 
 PRIORITY_WORDS = {"red": "🔴 red (needs you now)", "yellow": "🟡 yellow (waiting a while)",
-                  "green": "🟢 green (new)"}
+                  "green": "🟢 green (new)", "low": "⚪ low (no action needed)"}
 
 
 def _priority(e: dict) -> str:
@@ -206,7 +214,7 @@ def entries(sections: dict, data: dict, nick: dict[str, str] | None = None,
         facts += _followup_facts({"jobs": e.get("jobs") or []})
         facts += _review_facts(st) if st else []
         out.append({"url": url, "title": e.get("title", ""),
-                    "section": "Follow-ups on your reviews", "priority": _priority(e),
+                    "section": P.SECTION_NAMES[P.FOLLOWUP], "priority": _priority(e),
                     "why": why(e), "facts": facts})
     for e in sections["owed"]:
         st = e["st"]
@@ -214,15 +222,16 @@ def entries(sections: dict, data: dict, nick: dict[str, str] | None = None,
                     "section": "Reviews you owe", "priority": _priority(e),
                     "why": why(e) + f" (triage: {st.get('reason', '')})",
                     "facts": _review_facts(st)})
-    for reason, item in sections["other"]:
-        url = item.get("pr_url") or item.get("url") or ""
+    for e in sections["other"]:
+        url = e["url"]
         if url in reviews:
             facts = _review_facts(reviews[url])
         else:
-            facts = [f"Author: {item.get('author', '?')}. Not a review candidate and not yours."]
-        out.append({"url": url, "title": item.get("title", ""),
-                    "section": "Everything else (not counted)", "priority": "none",
-                    "why": reason, "facts": facts})
+            facts = [f"Author: {(e.get('st') or {}).get('author', '?')}. "
+                     "Not a review candidate and not yours."]
+        out.append({"url": url, "title": e.get("title", ""),
+                    "section": P.SECTION_NAMES[P.OTHER], "priority": _priority(e),
+                    "why": why(e), "facts": facts})
 
     seen, unique = set(), []
     for e in out:

@@ -28,11 +28,15 @@ Each thread event carries `blocking` (triage/priority.py is_blocking, true when 
 Josh's comments in the thread blocks), which colors the PR's follow-up red or yellow.
 
 Others' PRs also fire a "rerequest" event when Josh's review is requested again after
-his last review or comment there (`pending_rerequest`), once per request event.
+his last review or comment there (`pending_rerequest`), once per request event, and a
+"mention" event for each human comment, review body or inline comment that @mentions
+him (`_diff_mentions`), once per item. A mention inside a thread Josh is already in
+is left to that thread's reply event.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -274,6 +278,50 @@ def _diff_rerequests(pr: dict, prev: dict | None, ctx: Ctx) -> tuple[list[dict],
              "at": r.get("at"), "url": pr["url"], "first_line": ""}], ids
 
 
+# --- @mentions on others' PRs -------------------------------------------------------
+
+
+def mention_re(me: str) -> re.Pattern:
+    """@me as a whole handle, not inside an email address or a longer login."""
+    return re.compile(rf"(?<![\w@./-])@{re.escape(me)}(?![\w-])", re.IGNORECASE)
+
+
+def _mention_items(pr: dict, me: str) -> list[tuple[str, str, dict, dict | None]]:
+    """(where, seen id, item, thread) for every human item that @mentions Josh."""
+    rx = mention_re(me)
+    items = [("issue", f"ic:{c['id']}", c, None) for c in pr["issue_comments"]]
+    items += [("review", f"rv:{r['id']}", {**r, "created_at": r.get("submitted_at")}, None)
+              for r in pr["reviews"] if r["state"] != "PENDING"]
+    for t in pr["threads"]:
+        if any(c["author"] == me for c in t["comments"]):
+            continue
+        items += [("inline", f"rc:{c['id']}", c, t) for c in t["comments"]]
+    return [(w, k, c, t) for w, k, c, t in items
+            if _human(c, me) and rx.search(c.get("body") or "")]
+
+
+def _diff_mentions(pr: dict, prev: dict | None, ctx: Ctx) -> tuple[list[dict], list[str]]:
+    hits = _mention_items(pr, ctx.me)
+    seen = set((prev or {}).get("mentions_seen", []))
+    ids = sorted(seen | {k for _, k, _, _ in hits})
+    if ctx.seeding:
+        return [], ids
+    events = []
+    for where, key, c, t in hits:
+        if key in seen or (prev is None and not _after_cutoff(c.get("created_at"), ctx.cutoff)):
+            continue
+        events.append({
+            "type": "mention", "pr": _pr_ref(pr), "actor": c["author"], "where": where,
+            "comment_id": c["id"], "thread_id": t["id"] if t else None,
+            "root_id": t["comments"][0]["id"] if t else None,
+            "path": t["path"] if t else None, "line": (t.get("line") or t.get("original_line")) if t else None,
+            "body": c.get("body") or "", "url": c.get("url") or pr["url"],
+            "thread": [{"author": x["author"], "body": x["body"]} for x in t["comments"]] if t else [],
+            "first_line": _first_line(c.get("body") or ""), "mentioned_at": c.get("created_at"),
+            "head": pr["head"]})
+    return events, ids
+
+
 # --- entry point -----------------------------------------------------------------
 
 
@@ -290,9 +338,10 @@ def diff_pr(pr: dict, prev: dict | None, ctx: Ctx) -> tuple[list[dict], dict]:
     else:
         events, threads = _diff_threads(pr, (prev or {}).get("threads", {}), first_sight, ctx)
         rerequests, requests_seen = _diff_rerequests(pr, prev, ctx)
-        events += rerequests
+        mentions, mentions_seen = _diff_mentions(pr, prev, ctx)
+        events += rerequests + mentions
         state = {"kind": "others", "seen": [], "threads": threads,
-                 "requests_seen": requests_seen}
+                 "requests_seen": requests_seen, "mentions_seen": mentions_seen}
     state.update({"repo": pr["repo"], "number": pr["number"], "updated_at": pr["updated_at"],
                   "head": pr["head"], "missing_ticks": 0})
     return events, state

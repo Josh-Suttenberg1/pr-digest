@@ -1,0 +1,4 @@
+#!/bin/bash
+# Install a committed version for the menu bar and the watcher to run. See deploy.py.
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+exec "$REPO/.venv/bin/python" "$REPO/deploy.py" "$@"

@@ -90,7 +90,8 @@ GITHUB_TOKEN=ghp_xxx python3 pr_digest.py
 For a glanceable view instead of a file, there's a [SwiftBar](https://swiftbar.app)
 plugin. Every PR gets **one row** with a priority dot, and the menu-bar title counts
 PRs per color, e.g. `🔴2 🟡1 🟢2` (`✓` when there's nothing to do). A grey legend at
-the top explains the dots: 🔴 needs you now · 🟡 waiting a while · 🟢 new. Each row
+the top explains the dots: 🔴 needs you now · 🟡 waiting a while · 🟢 new · ⚪ no
+action needed. Each row
 reads `<dot> <ticket> · <what happened> · <PR title>`, so the ticket always says which
 PR it is and truncation cuts the title, not the action. The dropdown has four
 sections, and each PR appears in exactly one:
@@ -103,18 +104,20 @@ sections, and each PR appears in exactly one:
    reviewed, every comment to answer by kind (Blocking / Suggestion / Question / Nit,
    linked to its thread), and **Go through these with Claude**. GitHub drafts with
    nothing to answer collapse into one submenu.
-2. **Follow-ups on your reviews** — others' PRs you reviewed where someone responded.
-   🔴 when the author re-requested you or answered (or changed the code under) one of
-   your blocking comments; 🟡 when only non-blocking ones got responses. The submenu
-   lists every response with the watcher's drafted reply (Post / Edit first / Read
-   Claude's follow-up / Dismiss), then **Post the drafted replies** and the review
-   draft's actions.
+2. **Follow-ups and mentions** — others' PRs you reviewed where someone responded,
+   and any PR where someone @mentioned you. 🔴 for a mention, a re-request, or an
+   answer to (or code change under) one of your blocking comments; 🟡 when only
+   non-blocking ones got responses. The watcher drafts a reply to each response and
+   each mention. The submenu lists them with their drafted replies (Post / Edit first
+   / Read Claude's follow-up / Dismiss), then **Post the drafted replies** and the
+   review draft's actions.
 3. **Reviews you owe** — PRs you haven't reviewed yet (or whose review of yours was
    dismissed). 🟡 when stalled: waiting more than `[priority] stale_after_days`, under
    the required approvals, and at most `max_engaged_for_stale` others engaged. 🟢
    otherwise. Each row has its review draft's status and actions.
-4. **Everything else** — a collapsed list of every other open PR you're involved in,
-   each with the reason it isn't counted, so you can check the sorting.
+4. **Non action requiring updates** — ⚪ low priority: every other open PR you're
+   involved in, with what happened in words (the author is still working, waiting on
+   the author, parked, already approved, GitHub drafts). Never counted, never notified.
 
 Holding ⌥ turns a colored row into **Dismiss**: it loses its dot until something newer
 happens on the PR. The rules live in `triage/priority.py`, which the menu, the
@@ -137,9 +140,12 @@ comments, 1 blocking`), with a distinct chime for red and a softer one for yello
 on a PR make one notification; later activity at the same or a lower color only
 updates the menu, and a PR pops up again only when it rises (yellow → red) or after
 its row clears. Approvals, green review requests and activity on PRs you haven't
-engaged with never pop up. Clicking one of your PRs' notifications opens a Claude
-session on its comments (a `prdigest://respond` link, so it needs the link handler
-above); a follow-up's opens the comment that was answered. Every notification the
+engaged with never pop up. A notification only links to something that exists:
+clicking one of your PRs' opens a Claude session on its comments (a
+`prdigest://respond` link, so it needs the link handler above). A follow-up or
+mention waits until Claude's drafted replies are written, then opens them as a page;
+if the drafts don't come within 30 minutes it goes out linking to the comment on
+GitHub. A re-request on its own opens the PR. Every notification the
 watcher sends is logged to `~/.cache/pr-digest/watcher.log`. Set SwiftBar to
 **Alerts** in System Settings → Notifications so they stay on screen.
 
@@ -186,6 +192,16 @@ working, stalled, or idle. Run `claude-heartbeat/install.sh` once.
 | `🔴2 🟡1` 🔄 (spinner) | Refreshing in the background — the counts and list stay visible. |
 
 **Refresh now** re-fetches on demand.
+
+**Deploying.** The menu, the watcher, the weekly lessons job and the `prdigest://`
+handler never run this checkout's files: they run an installed copy under
+`~/.local/share/pr-digest/current`, built with `git archive` from a commit, so editing
+or testing here changes nothing live. `bin/deploy` installs HEAD (or a given ref) and
+switches everything to it at once; `bin/deploy --setup` does that and also points
+SwiftBar's plugin folder, the launchd jobs and the link handler at the install (once,
+or when that wiring changes); `bin/deploy --status` says which commit runs. Data stays
+in the checkout: `state/` (watcher state, follow-up jobs, the menu's cache in
+`state/menu/`), `output/`, `review-drafter/state/` and `.env`.
 
 State lives in `state/` (git-ignored); `cache.json` holds the last fetched triage
 so the menu can draw instantly.
