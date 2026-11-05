@@ -218,9 +218,10 @@ def write_status(data: dict) -> None:
     try:
         import status_report
         required = _required_approvals()
+        people = _people(fetch=True)
         status_report.write(build_sections(data, _followup_jobs(), load_dismissed(), required,
-                                           _nicknames(), prio=_priority_settings()),
-                            data, _nicknames(), required=required)
+                                           people, prio=_priority_settings()),
+                            data, people, required=required)
     except Exception:  # noqa: BLE001 — the status files must never break the menu
         pass
 
@@ -486,8 +487,9 @@ def _draft_actions(key: str, head: str, url: str) -> None:
     draft = status.get("draft")
     if draft and draft["path"]:
         _read_item("--Read draft", draft["path"])
-    emit("--Re-run review" if draft else "--Review with Claude", bash=str(REVIEW_MENU),
-         param1="--review", param2=key, terminal="false", refresh="true")
+    if _reviews_on():
+        emit("--Re-run review" if draft else "--Review with Claude", bash=str(REVIEW_MENU),
+             param1="--review", param2=key, terminal="false", refresh="true")
     if draft:
         emit("--Open in Claude", bash=str(REVIEW_MENU), param1="--open-claude",
              param2=key, terminal="false")
@@ -532,7 +534,8 @@ def owed_block(e: dict, nick: dict[str, str]) -> None:
     emit(row_text(e), href=url)
     _pr_header(e)
     emit(f"--{st.get('size', '')} · by {_who(st.get('author', '?'), nick)}", color="#888888")
-    emit(f"--{_draft_line(key, st.get('head_sha') or '')}", color="#888888")
+    if _reviews_on():
+        emit(f"--{_draft_line(key, st.get('head_sha') or '')}", color="#888888")
     emit("-----")
     _draft_actions(key, st.get("head_sha") or "", url)
     emit("--Open on GitHub", href=url)
@@ -872,12 +875,22 @@ def render_menu(sections: dict, *, spinner: bool, error: str | None,
     emit(f"Updated {cache_label()} · {watcher_label()}", color="#888888")
 
 
-def _nicknames() -> dict[str, str]:
+def _people(fetch: bool = False):
+    """GitHub profile names (names.py); the instant render only reads the cache."""
     try:
-        import settings
-        return settings.load().get("nicknames", {})
+        import names
+        return names.book(fetch=fetch)
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _reviews_on() -> bool:
+    """False when review.reviewer_agent is empty: the menu offers no reviews."""
+    try:
+        import settings
+        return bool(settings.load()["review"]["reviewer_agent"])
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _required_approvals() -> int:
@@ -1044,7 +1057,7 @@ def main() -> int:
         fetching = True
 
     required = _required_approvals()
-    nick = _nicknames()
+    nick = _people()
     sections = build_sections(cache if have_data else {}, _followup_jobs(), load_dismissed(),
                               required, nick, prio=_priority_settings())
     render_menu(sections, spinner=fetching, error=cache.get("error"),

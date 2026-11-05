@@ -19,8 +19,8 @@ from triage.priority import TICKET_RE
 TITLE_MAX = 40
 
 
-def who(login: str, nicknames: dict[str, str]) -> str:
-    return nicknames.get(login, login)
+def who(login: str, people: dict[str, str]) -> str:
+    return people.get(login, login)
 
 
 def subtitle(pr: dict) -> str:
@@ -33,9 +33,9 @@ def subtitle(pr: dict) -> str:
     return f"{key} · {rest}" if rest else key
 
 
-def _event_line(event: dict, nicknames: dict[str, str]) -> str:
+def _event_line(event: dict, people: dict[str, str]) -> str:
     """One event in words; '' for one that adds nothing (a bare approval)."""
-    name = who(event.get("actor") or "", nicknames)
+    name = who(event.get("actor") or "", people)
     kind = event["type"]
     from triage import comment_kind
     line = comment_kind.summary(event.get("first_line") or "", 120)
@@ -56,7 +56,7 @@ def _event_line(event: dict, nicknames: dict[str, str]) -> str:
 
 
 def render_pr(pr: dict, color: str, reason: str, events: list[dict],
-              nicknames: dict[str, str], href: str) -> dict:
+              people: dict[str, str], href: str) -> dict:
     """The one notification for a PR this tick: {style, color, title, subtitle, body,
     href, group}. `href` is chosen by the caller and always exists already."""
     from triage import priority
@@ -64,7 +64,7 @@ def render_pr(pr: dict, color: str, reason: str, events: list[dict],
     rest = priority.TICKET_RE.sub("", pr["title"]).strip(" []:·-")
     if len(rest) > TITLE_MAX * 2:
         rest = rest[:TITLE_MAX * 2 - 1] + "…"
-    lines = [x for x in (_event_line(e, nicknames) for e in events) if x]
+    lines = [x for x in (_event_line(e, people) for e in events) if x]
     body = " · ".join(dict.fromkeys(lines))
     if len(body) > 200:
         body = body[:199] + "…"
@@ -74,7 +74,7 @@ def render_pr(pr: dict, color: str, reason: str, events: list[dict],
             "group": f"pr-{pr['repo']}-{pr['number']}"}
 
 
-def render(event: dict, nicknames: dict[str, str], required_approvals: int = 2) -> dict:
+def render(event: dict, people: dict[str, str], required_approvals: int = 2) -> dict:
     """A watcher notice (type "notice"): {"style", "title", "subtitle", "body", "href",
     "group"}."""
     if event["type"] != "notice":

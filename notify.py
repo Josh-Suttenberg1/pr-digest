@@ -76,17 +76,30 @@ def alert(
     run: Runner = subprocess.run,
     sound_file: str | None = None,
     group: str | None = None,
+    silent: bool = False,
 ) -> None:
     """A persistent alert. With `sound_file`, that file plays through afplay instead
-    of the notification's own sound."""
+    of the notification's own sound; `silent` plays nothing at all."""
+    quiet = silent or bool(sound_file)
     if swiftbar_running(run):
-        url = swiftbar_notify_url(plugin, title, subtitle, body, href, silent=bool(sound_file))
+        url = swiftbar_notify_url(plugin, title, subtitle, body, href, silent=quiet)
         run(["open", "-g", url], capture_output=True)
     else:
         run(terminal_notifier_argv(title, subtitle, body, href=href, group=group,
-                                   sound=None if sound_file else sound), capture_output=True)
-    if sound_file:
+                                   sound=None if quiet else sound), capture_output=True)
+    if sound_file and not silent:
         play(sound_file, run)
+
+
+def sound_options(cfg: dict, color: str | None = None) -> dict:
+    """alert() keyword arguments for the user's sound settings: nothing when
+    notify.sounds is off, a PR color's file for a PR, else the alert sound."""
+    n = cfg["notify"]
+    if not n.get("sounds", True):
+        return {"silent": True}
+    if color:
+        return {"sound_file": n.get(f"{color}_sound") or None}
+    return {"sound": n["alert_sound"]}
 
 
 def play(sound_file: str, run: Runner = subprocess.run) -> None:

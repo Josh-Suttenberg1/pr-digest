@@ -275,8 +275,13 @@ def review(target: str, phase_file: Path | None, refresh_plugin: str | None,
 
     reviewer_output is a pr-reviewer report an interactive session wrote by following
     the agent file itself; the reviewer run is skipped and only the verifier runs.
+    An empty review.reviewer_agent turns reviews off; an empty verifier_agent skips
+    the verifier.
     """
     rcfg = cfg["review"]
+    if reviewer_output is None and not rcfg.get("reviewer_agent"):
+        raise ReviewError("reviews are off: review.reviewer_agent is empty in the config", EXIT_OUTPUT)
+    skip_verifier = skip_verifier or not rcfg.get("verifier_agent")
     cwd = settings.workspace(cfg)
     started = time.time()
     run_dir = RUNS_DIR / f"{datetime.now():%Y%m%d-%H%M%S}-{_slug(target)}"
@@ -360,7 +365,7 @@ def announce(records: list[dict], cfg: dict) -> None:
         if r["severity"] == "substantive":
             notify.alert(
                 f"🔎 Review needs a look: {r['key']}", title_key, body, href=href,
-                plugin=cfg["notify"]["swiftbar_plugin"], sound=cfg["notify"]["alert_sound"],
+                plugin=cfg["notify"]["swiftbar_plugin"], **notify.sound_options(cfg),
             )
         else:
             word = "only nits" if r["severity"] == "nits-only" else "clean"

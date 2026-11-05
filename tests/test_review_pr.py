@@ -139,7 +139,7 @@ class WriteDraftTests(unittest.TestCase):
 class InSessionReviewerTests(unittest.TestCase):
     """--reviewer-output: the session wrote the report, so only the verifier runs."""
 
-    def _run(self, report: str, verifier_result: str | None = None):
+    def _run(self, report: str, verifier_result: str | None = None, verifier: str = "pr-review-verifier"):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             report_path = d / "report.md"
@@ -147,7 +147,7 @@ class InSessionReviewerTests(unittest.TestCase):
             cfg = {
                 "workspace": str(d),
                 "review": {
-                    "reviewer_agent": "pr-reviewer", "verifier_agent": "pr-review-verifier",
+                    "reviewer_agent": "pr-reviewer", "verifier_agent": verifier,
                     "timeout": 60, "max_concurrent": 1, "drafts_dir": str(d / "drafts"),
                 },
             }
@@ -169,6 +169,17 @@ class InSessionReviewerTests(unittest.TestCase):
         self.assertIsNone(rec["reviewer_cost_usd"])
         self.assertTrue(rec["verified"])
         self.assertIn("Verification", draft)
+
+    def test_empty_verifier_skips_it(self):
+        rec, _, run_agent, _ = self._run(SINGLE, verifier="")
+        run_agent.assert_not_called()
+        self.assertFalse(rec["verified"])
+
+    def test_empty_reviewer_turns_reviews_off(self):
+        cfg = {"workspace": "/tmp", "review": {"reviewer_agent": "", "verifier_agent": ""}}
+        with self.assertRaises(review_pr.ReviewError) as e:
+            review_pr.review("ABC-1", None, None, False, cfg)
+        self.assertIn("reviews are off", str(e.exception))
 
     def test_nits_only_report_runs_no_agent(self):
         nits = SINGLE.replace("1. 🔴", "1. 🔵").replace("SEVERITY: substantive", "SEVERITY: nits-only")

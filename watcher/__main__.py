@@ -44,6 +44,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gh_prs  # noqa: E402
+import names  # noqa: E402
 import notify  # noqa: E402
 import settings  # noqa: E402
 from watcher import events as ev  # noqa: E402
@@ -97,7 +98,7 @@ def pr_priority(pr: dict, cfg: dict, jobs: list[dict]) -> tuple[str | None, str]
     """(color, reason) for one PR snapshot, through triage/priority.py. Your PRs take
     a fresh triage/mine.py row (one gh call); others' take their open follow-up jobs
     (`jobs`, including this tick's new responses) and any pending re-request."""
-    nick = cfg.get("nicknames", {})
+    nick = names.book(fetch=True)
     if pr["kind"] == "mine":
         try:
             row = mine_triage.row_for(cfg["org"], pr["repo"], pr["number"], pr["title"],
@@ -242,7 +243,7 @@ def notification_href(pr: dict, pr_jobs: list[dict], cfg: dict, dry_run: bool) -
 def deliver(notes: list[tuple], cfg: dict, dry_run: bool) -> None:
     """One alert per PR, red first, with its color's sound; past max_notifs_per_tick,
     one summary banner. `notes` are (pr, color, reason, events, pr_jobs)."""
-    nick = cfg.get("nicknames", {})
+    nick = names.book(fetch=True)
     shown = [render.render_pr(pr, color, reason, evs, nick,
                               notification_href(pr, js, cfg, dry_run))
              for pr, color, reason, evs, js in notes]
@@ -254,7 +255,7 @@ def deliver(notes: list[tuple], cfg: dict, dry_run: bool) -> None:
             continue
         notify.alert(n["title"], n["subtitle"], n["body"], href=n["href"],
                      plugin=cfg["notify"]["swiftbar_plugin"], group=n["group"],
-                     sound_file=cfg["notify"].get(f"{n['color']}_sound"))
+                     **notify.sound_options(cfg, n["color"]))
         _log_sent(n)
     overflow = shown[room:]
     if overflow:
@@ -281,7 +282,7 @@ def _notice(cfg: dict, title: str, body: str, style: str = "banner") -> None:
     n = render.render({"type": "notice", "title": title, "body": body, "style": style}, {})
     if style == "alert":
         notify.alert(n["title"], n["subtitle"], n["body"], href=n["href"],
-                     plugin=cfg["notify"]["swiftbar_plugin"], sound=cfg["notify"]["alert_sound"])
+                     plugin=cfg["notify"]["swiftbar_plugin"], **notify.sound_options(cfg))
     else:
         notify.banner(n["title"], n["subtitle"], n["body"], href=n["href"], group=n["group"])
     _log_sent(n)
@@ -369,7 +370,7 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
                           lambda pr, js: pr_priority(pr, cfg, js), seed=seeding or seed_colors)
     pending = {} if replay else st.get("pending", {})
     ready = hold_for_drafts(notes, pending, jobs + event_jobs(events, jobs, now_iso), now_iso,
-                            cfg.get("nicknames", {}), me)
+                            names.book(fetch=True), me)
     deliver(ready, cfg, dry_run)
     if dry_run:
         for pid, p in pending.items():
@@ -475,7 +476,7 @@ def notify_test(cfg: dict) -> int:
              "Yellow: waiting a while. The softer chime.")):
         notify.alert(title, "Test notification from the PR watcher", body,
                      plugin=cfg["notify"]["swiftbar_plugin"],
-                     sound_file=cfg["notify"].get(f"{color}_sound"))
+                     **notify.sound_options(cfg, color))
         time.sleep(2)
     return 0
 

@@ -32,7 +32,7 @@ merge whose resolution writes or drops its own code still counts. Telling those 
 needs the repo cloned under `repos_root`; without a clone every commit counts.
 
 Configuration comes from settings (`org`, `repos_root`, `watcher.required_approvals`,
-`triage.pod`, `triage.ci_ignored`, `nicknames`) through `configure()`, which runs at
+`triage.pod`, `triage.ci_ignored`) through `configure()`, which runs at
 import. Read-only against GitHub; it may fetch a PR's commit objects into the local
 clone's object store (no branch, index, worktree or FETCH_HEAD change).
 """
@@ -47,6 +47,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+import names
 import settings
 
 ORG = "avetta"
@@ -60,8 +61,8 @@ POD: set[str] = set()
 # Checks whose failure says nothing about whether the author is done (matched as a
 # case-insensitive substring of the check name).
 CI_IGNORED: tuple[str, ...] = ()
-# GitHub login -> the name shown for that person.
-NICKNAMES: dict[str, str] = {}
+# GitHub login -> the name shown for that person (names.py).
+NAMES = {}
 # Logins that never count as a person engaging with a PR (lower-case). GitHub Apps and
 # `[bot]` logins are recognized on their own.
 BOTS: set[str] = set()
@@ -81,7 +82,7 @@ _FETCH_LOCKS_GUARD = threading.Lock()
 
 def configure(cfg: dict | None = None) -> None:
     """Set the module's knobs from a settings dict (default: settings.load())."""
-    global ORG, REPOS_ROOT, WELL_APPROVED, POD, CI_IGNORED, NICKNAMES, BOTS
+    global ORG, REPOS_ROOT, WELL_APPROVED, POD, CI_IGNORED, NAMES, BOTS
     cfg = cfg if cfg is not None else settings.load()
     ORG = cfg.get("org") or ORG
     REPOS_ROOT = settings.path_of(cfg.get("repos_root") or cfg.get("workspace") or str(REPOS_ROOT))
@@ -89,7 +90,7 @@ def configure(cfg: dict | None = None) -> None:
     tri = cfg.get("triage") or {}
     POD = set(tri.get("pod") or [])
     CI_IGNORED = tuple(s.lower() for s in tri.get("ci_ignored") or [])
-    NICKNAMES = dict(cfg.get("nicknames") or {})
+    NAMES = names.book(fetch=True)
     BOTS = {b.lower() for b in (cfg.get("watcher") or {}).get("bots") or []}
 
 
@@ -613,7 +614,7 @@ def _days_since(stamp: str) -> float:
 def short(login: str, me: str = "") -> str:
     if login == me:
         return "you"
-    return NICKNAMES.get(login) or f"@{login}"
+    return NAMES.get(login) or f"@{login}"
 
 
 def _rank(st: dict) -> None:

@@ -66,6 +66,8 @@ DEFAULTS: dict = {
     },
     "notify": {
         "swiftbar_plugin": "prdigest.1h.sh",
+        # Off: every notification is silent.
+        "sounds": True,
         "alert_sound": "Glass",
         # Played with afplay for a PR's notification, by its priority color.
         "red_sound": "/System/Library/Sounds/Glass.aiff",
@@ -81,8 +83,6 @@ DEFAULTS: dict = {
     "session": {
         "terminal": "iterm",
     },
-    # GitHub login -> the name notifications use for that person.
-    "nicknames": {},
 }
 
 

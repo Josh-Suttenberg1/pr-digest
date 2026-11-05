@@ -615,7 +615,8 @@ def run(jid: str, cfg: dict | None = None) -> int:
         if url:
             job.update(status="reapproved", posted_url=url)
             save_job(job)
-            who = cfg.get("nicknames", {}).get(job["actor"], job["actor"])
+            import names
+            who = names.book(fetch=True).get(job["actor"], job["actor"])
             notify.banner(f"✅ Re-approved: {who} did what you asked", render.subtitle(pr),
                           f"Fixed in {', '.join(s[:7] for s in shas)}", href=url)
             return 0

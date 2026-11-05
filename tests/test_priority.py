@@ -360,6 +360,22 @@ class SoundTest(unittest.TestCase):
         self.assertIn("silent=true", calls[1][2])
         self.assertEqual(calls[2], ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"])
 
+    def test_sounds_off_plays_nothing(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return mock.Mock(returncode=0)
+        cfg = {"notify": {"sounds": False, "red_sound": "/x.aiff", "alert_sound": "Glass"}}
+        notify.alert("🔴 ABC-1 · x", "t", "b", run=run, **notify.sound_options(cfg, "red"))
+        self.assertIn("silent=true", calls[1][2])
+        self.assertEqual(len(calls), 2)
+
+    def test_sound_options_by_color_and_for_notices(self):
+        cfg = {"notify": {"red_sound": "/x.aiff", "alert_sound": "Glass"}}
+        self.assertEqual(notify.sound_options(cfg, "red"), {"sound_file": "/x.aiff"})
+        self.assertEqual(notify.sound_options(cfg), {"sound": "Glass"})
+
 
 
 # --- @mentions, drafts before popups -----------------------------------------

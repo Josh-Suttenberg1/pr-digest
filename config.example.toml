@@ -1,57 +1,27 @@
-# Copy to ~/.config/pr-digest/config.toml. Every key is optional; settings.py holds the
-# defaults. The reviewer's model and effort live in the agent files
-# (<workspace>/.claude/agents/ or ~/.claude/agents/), not here.
+# Copy to ~/.config/pr-digest/config.toml and change what differs for you.
+# Everything not listed here has a working default in settings.py.
 
 me = "your-github-login"
-org = "avetta"
-workspace = "~/work"            # the folder you start Claude in: its CLAUDE.md and .claude/agents/ load
-# repos_root = "~/code"          # only if your clones aren't at <workspace>/<repo>
+
+# The folder you start Claude in. Reviews, follow-ups and "Open in Claude" sessions
+# start here, so they pick up its CLAUDE.md and its .claude/agents/. Your repo clones
+# are expected at <workspace>/<repo>.
+workspace = "~/work"
+# repos_root = "~/code"          # only if your clones live somewhere else
 
 [review]
+# Your review agent, by name. Claude finds it in <workspace>/.claude/agents/ or
+# ~/.claude/agents/. Its model and effort come from the agent file.
+# "" turns reviews off: you still get the menu and notifications.
 reviewer_agent = "pr-reviewer"
+# A second agent that checks the reviewer's findings before you see them. "" skips it.
 verifier_agent = "pr-review-verifier"
-# drafts_dir = "~/somewhere"    # default: output/reviews in this checkout
-timeout = 3600                   # seconds, per agent run
-max_concurrent = 2               # reviews running at once; more wait for a free slot
-
-[models]
-followup = "sonnet"              # checks an author's new commits against your review comment
-lessons = "sonnet"               # clusters harvested review comments into proposed lessons
 
 [watcher]
-poll_interval = 120              # seconds; also the launchd StartInterval
-required_approvals = 2
-max_concurrent = 2               # follow-up runs at once
-followup_timeout = 600           # seconds
-max_notifs_per_tick = 6
-# Re-approve for you after the author pushes, but only once they've done everything your
-# comments asked and every blocking comment or change request on the PR, from any
-# reviewer, has been answered.
+# Re-approve for you after the author pushes, but only once they've done everything
+# your comments asked and every blocking comment or change request on the PR, from
+# any reviewer, has been answered.
 auto_reapprove = false
-bots = ["copilot-pull-request-reviewer", "avettabot"]
-# reports_dir = "~/somewhere"   # default: output/followups in this checkout
-
-[triage]                         # sorting PRs into "reviews you owe" vs everything else
-pod = []                         # GitHub logins whose PRs rank higher, e.g. ["teammate"]
-ci_ignored = []                  # check names (substrings) whose failure doesn't park a PR
-
-[lessons]
-repos = []                       # repos to harvest review lessons from; empty = off
-days = 90
-# out_dir = "~/somewhere"       # default: output/lessons in this checkout
-
-[priority]                       # the menu's red / yellow / green dots
-stale_after_days = 2             # a review you owe turns yellow after waiting this long…
-max_engaged_for_stale = 1        # …while at most this many others have reviewed or commented
 
 [notify]
-swiftbar_plugin = "prdigest.1h.sh"   # the plugin SwiftBar's alerts are sent as
-alert_sound = "Glass"                # watcher health alerts
-red_sound = "/System/Library/Sounds/Glass.aiff"     # a PR turning red
-yellow_sound = "/System/Library/Sounds/Tink.aiff"   # a PR turning yellow
-
-[session]
-terminal = "iterm"
-
-[nicknames]                      # GitHub login -> the name notifications use
-# some-login = "Nickname"
+sounds = true                    # false: every notification is silent

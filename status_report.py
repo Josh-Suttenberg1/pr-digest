@@ -73,7 +73,7 @@ def _review_facts(st: dict) -> list[str]:
 
 
 def _name(login: str, nick: dict[str, str]) -> str:
-    """'Woods (plaxdan)' when there's a nickname, else the login."""
+    """'Ada Lovelace (alovelace)' when the profile has a name, else the login."""
     if login.startswith("team:"):
         return f"the {login[len('team:'):]} team"
     return f"{nick[login]} ({login})" if login in nick else login
