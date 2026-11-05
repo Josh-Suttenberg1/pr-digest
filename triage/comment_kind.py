@@ -36,10 +36,12 @@ _ALIASES = {"nit": "nit", "nitpick": "nit", "minor": "nit",
             "blocking": "blocking", "blocker": "blocking", "must fix": "blocking",
             "must-fix": "blocking"}
 
-# A leading label: optional markdown emphasis or brackets, the word, then ":" or a
-# closing bracket. "Nit picking aside" doesn't match; "**Nit:**" and "[nit]" do.
+# A leading label: optional markdown emphasis or brackets, an optional numbering such
+# as "Comment 3 · ", the word, then ":" or a closing bracket. "Nit picking aside"
+# doesn't match; "**Nit:**", "[nit]" and "**Comment 3 · Suggestion:**" do.
 _LABEL = re.compile(
-    r"^[\s*_\[(]*(nitpick|nit|minor|suggestion|suggest|question|q|blocking|blocker|must[- ]fix)"
+    r"^[\s*_\[(]*(?:comment\s*\d+\s*[·•\-–—]\s*)?"
+    r"(nitpick|nit|minor|suggestion|suggest|question|q|blocking|blocker|must[- ]fix)"
     r"\s*(?:[:\])]|\*\*\s*:|:\s*\*\*)[\s*_\])]*",
     re.IGNORECASE,
 )
