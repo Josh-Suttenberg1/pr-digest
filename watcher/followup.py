@@ -1,24 +1,24 @@
-"""Follow-ups: when someone responds to Josh's review comment, check the new commits;
-when someone @mentions him, draft his answer.
+"""Follow-ups: when someone responds to your review comment, check the new commits;
+when someone @mentions you, draft your answer.
 
 A job is one JSON file in state/watcher/jobs/<job_id>.json. A response's id is derived
-from (thread id, Josh's comment id), a mention's from the mentioning item, so the same
+from (thread id, your comment id), a mention's from the mentioning item, so the same
 response or mention never queues twice. A mention job has `trigger` "mention" and
 `where` (issue comment, review body, or inline comment); its reply posts as a reply in
 the inline thread, or as a top-level comment otherwise.
 
   queued  -> running (detached `python -m watcher followup-run <job>`) -> ready | failed
-  ready   -> posted (Josh clicked "Post this reply") | dismissed
-  queued, ready or failed -> cleared, when Josh answers the thread himself: he replies
+  ready   -> posted (you clicked "Post this reply") | dismissed
+  queued, ready or failed -> cleared, when you answer the thread yourself: you reply
           in it, resolves it, or submits a new review (`cleared_jobs`, run each tick)
 
 A finished run doesn't pop up a notification: the watcher already sent the PR's one
 notification when the response arrived, and the menu row updates with the verdict.
 
-The run collects only the commits since Josh's comment, asks claude (models.followup)
+The run collects only the commits since your comment, asks claude (models.followup)
 for a verdict and a drafted reply, and writes the report itself. claude gets read-only
 tools scoped to the repo clone and cannot post: posting happens only in post(), which
-the menu bar calls when Josh clicks, and which posts exactly the reply file's text.
+the menu bar calls when you click, and which posts exactly the reply file's text.
 """
 
 from __future__ import annotations
@@ -44,13 +44,13 @@ FOOTER = "Drafted with Claude 🤖"
 DIFF_LIMIT = 60_000
 VERDICTS = ("addressed", "partly", "not_addressed")
 
-PROMPT = """Josh left a review comment on a coworker's pull request. Since then, {trigger_text}.
-Decide whether the commits since his comment address it, and draft his reply.
+PROMPT = """@{me} left a review comment on a coworker's pull request. Since then, {trigger_text}.
+Decide whether the commits since that comment address it, and draft @{me}'s reply.
 
 PR: avetta/{repo}#{number} — {title}
 PR author: @{author}
 File: {path}{line_suffix}
-Josh's comment ({comment_url}):
+@{me}'s comment ({comment_url}):
 ---
 {my_comment}
 ---
@@ -58,7 +58,7 @@ Josh's comment ({comment_url}):
 The thread, in order:
 {thread}
 
-Commits since Josh's comment ({arm_short}..{head_short}){rebased_note}:
+Commits since @{me}'s comment ({arm_short}..{head_short}){rebased_note}:
 {commits}
 
 Diff of {path} over that range:
@@ -70,14 +70,14 @@ Files changed over that range:
 {stat}
 
 The clone is at {clone}. You may read more with `git -C {clone} show|log|diff` at
-these commits. Judge only against what Josh's comment asked for. Don't review anything else.
+these commits. Judge only against what @{me}'s comment asked for. Don't review anything else.
 
 Reply rules: address the PR author by handle, plain English, at most 3 sentences. Cite the
 commit (short sha) that fixed it. If it's not addressed, say concretely what is still missing.
 No bare acceptance-criteria labels. Don't add a signature.
 
-"mechanical" is true only when the commits do exactly what Josh's comment asked, as he asked
-it: no pushback, no different approach, nothing he asked left open. Explaining a separate
+"mechanical" is true only when the commits do exactly what @{me}'s comment asked, as it was
+asked: no pushback, no different approach, nothing asked left open. Explaining a separate
 question from someone else in the thread doesn't make it false.
 
 Output ONLY a JSON object, no prose, no code fences:
@@ -88,7 +88,7 @@ Output ONLY a JSON object, no prose, no code fences:
 """
 
 
-MENTION_PROMPT = """@{actor} mentioned Josh (@{me}) on a pull request. Draft Josh's answer.
+MENTION_PROMPT = """@{actor} mentioned @{me} on a pull request. Draft @{me}'s answer.
 
 PR: avetta/{repo}#{number} — {title}
 PR author: @{author}
@@ -101,12 +101,12 @@ Their comment ({url}):
 {clone_text}
 
 Reply rules: address @{actor} by handle, plain English, at most 4 sentences, and answer
-what they asked. Ground every claim in the code or the PR; when the answer needs Josh's
-own decision or knowledge you can't find, say in the reply that he'll follow up, and
+what they asked. Ground every claim in the code or the PR; when the answer needs @{me}'s
+own decision or knowledge you can't find, say in the reply that they'll follow up, and
 never invent facts. No bare acceptance-criteria labels. Don't add a signature.
 
 Output ONLY a JSON object, no prose, no code fences:
-{{"summary": "<one line: what they asked or told Josh>", "reply": "..."}}
+{{"summary": "<one line: what they asked or told @{me}>", "reply": "..."}}
 """
 
 
@@ -183,8 +183,8 @@ CLEARABLE = ("queued", "ready", "failed")
 
 
 def cleared_jobs(pr: dict, jobs: list[dict], me: str) -> list[tuple[str, str]]:
-    """(job id, why) for each of the PR's open jobs that Josh has answered himself since
-    the response: he replied in the thread or resolved it, or submitted a review that
+    """(job id, why) for each of the PR's open jobs that you have answered yourself since
+    the response: you replied in the thread or resolved it, or submitted a review that
     approves, requests changes, or has a body after the job was queued. Pure; `pr` is a
     watcher snapshot (watcher/gh.py normalize_pr). A running job is left for the next
     tick, so its run doesn't overwrite the status."""
@@ -289,7 +289,7 @@ def _git(clone: Path, *args: str, check: bool = False) -> subprocess.CompletedPr
 
 
 def collect_range(clone: Path, number: int, arm: str, head: str, path: str) -> dict:
-    """Commits and diffs between Josh's comment's commit and the current head."""
+    """Commits and diffs between your comment's commit and the current head."""
     _git(clone, "fetch", "-q", "--no-write-fetch-head", "origin", f"pull/{number}/head")
     if _git(clone, "cat-file", "-e", f"{arm}^{{commit}}").returncode != 0:
         _git(clone, "fetch", "-q", "--no-write-fetch-head", "origin", arm)
@@ -305,16 +305,16 @@ def collect_range(clone: Path, number: int, arm: str, head: str, path: str) -> d
             "stat": stat[-4000:] or "(no files changed)"}
 
 
-def build_prompt(job: dict, rng: dict, clone: Path) -> str:
+def build_prompt(job: dict, rng: dict, clone: Path, me: str) -> str:
     pr = job["pr"]
     trigger_text = {
         "reply": f"@{job['actor']} replied in the thread",
-        "outdated": "a commit changed the lines his comment was on",
-        "moved": "commits landed that touch the file his comment was on",
+        "outdated": "a commit changed the lines the comment was on",
+        "moved": "commits landed that touch the file the comment was on",
     }[job["trigger"]]
     thread = "\n".join(f"- @{c['author']}: {c['body'][:1500]}" for c in job["thread"])
     return PROMPT.format(
-        trigger_text=trigger_text, repo=pr["repo"], number=pr["number"], title=pr["title"],
+        me=me, trigger_text=trigger_text, repo=pr["repo"], number=pr["number"], title=pr["title"],
         author=pr["author"], path=job["path"],
         line_suffix=f":{job['line']}" if job.get("line") else "",
         comment_url=job.get("my_comment_url") or "", my_comment=job["my_comment"],
@@ -575,7 +575,7 @@ def run(jid: str, cfg: dict | None = None) -> int:
             raise RuntimeError(f"no local clone at {clone}")
         else:
             rng = collect_range(clone, pr["number"], job["arm_commit"], job["head"], job["path"])
-            prompt = build_prompt(job, rng, clone)
+            prompt = build_prompt(job, rng, clone, cfg["me"])
         job["prompt_sha256"] = hashlib.sha256(prompt.encode()).hexdigest()
         argv = ["claude", "-p", "--model", cfg["models"]["followup"], "--output-format", "json",
                 "--permission-mode", "dontAsk",
@@ -625,7 +625,7 @@ def run(jid: str, cfg: dict | None = None) -> int:
     return 0
 
 
-# --- Josh's actions from the menu ------------------------------------------------------
+# --- Your actions from the menu --------------------------------------------------------
 
 
 def post(jid: str) -> int:

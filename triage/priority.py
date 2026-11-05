@@ -87,7 +87,7 @@ def who(login: str, nick: dict[str, str]) -> str:
 
 
 def names(logins, nick: dict[str, str]) -> str:
-    """'Woods', 'Joshua and Mykal', 'Gator, DaVinci and Kyler'."""
+    """'Ada', 'Ada and Alan', 'Ada, Alan and Grace'."""
     out = [who(x, nick) for x in logins]
     if len(out) <= 1:
         return "".join(out)

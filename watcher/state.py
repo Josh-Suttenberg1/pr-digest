@@ -22,7 +22,7 @@ WATCHER_DIR = settings.STATE_DIR / "watcher"
 STATE_PATH = WATCHER_DIR / "state.json"
 LOCK_PATH = WATCHER_DIR / "lock"
 JOBS_DIR = WATCHER_DIR / "jobs"
-# PR url -> when Josh dismissed its menu row (ISO). Written by the menu; the tick reads
+# PR url -> when you dismissed its menu row (ISO). Written by the menu; the tick reads
 # it so the next response after a dismissal notifies afresh.
 CLEARED_PATH = WATCHER_DIR / "cleared.json"
 

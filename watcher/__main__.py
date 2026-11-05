@@ -16,8 +16,8 @@ triage/mine.py row, others' PRs from their follow-up jobs and any pending re-req
 A PR notifies only when its color rises above the color it last notified at
 (`state["notified"]`), so all of a tick's events make one notification, a later event
 at the same or a lower color only updates the menu, and yellow → red pops up again.
-The stored color is dropped once the PR has no color (the row cleared: Josh answered,
-posted the drafted replies, re-reviewed) or Josh dismissed its menu row
+The stored color is dropped once the PR has no color (the row cleared: you answered,
+posted the drafted replies, re-reviewed) or you dismissed its menu row
 (state/watcher/cleared.json); the next response then notifies afresh. Uncolored
 activity, green review requests and approvals never notify.
 
@@ -350,7 +350,7 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
         else:
             prs[pid]["missing_ticks"] = prs[pid].get("missing_ticks", 0) + 1
 
-    # Follow-ups Josh has answered himself (replied, resolved, re-reviewed) stop counting.
+    # Follow-ups you have answered yourself (replied, resolved, re-reviewed) stop counting.
     now_iso = _iso(server_now)
     jobs = followup.all_jobs()
     answered = [c for pr in detail.values() if pr["kind"] == "others"

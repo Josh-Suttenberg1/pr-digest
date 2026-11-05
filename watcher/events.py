@@ -9,28 +9,28 @@ up when the review is submitted, so a time watermark would skip it.
 
 Event ids: rv:<review id>, rc:<review-comment id>, ic:<issue-comment id>.
 
-Josh's own PRs ("mine"): every new human item is grouped by actor. An actor whose
+Your own PRs ("mine"): every new human item is grouped by actor. An actor whose
 new items include an APPROVED or CHANGES_REQUESTED review becomes one "decision"
 event, with that review's inline comments folded in; anyone else becomes one
 "comments" event.
 
-Others' PRs: only review threads containing one of Josh's comments matter. A thread
-is armed on Josh's latest comment in it and fires once, on whichever comes first:
-  reply     a human other than Josh comments after it
+Others' PRs: only review threads containing one of your comments matter. A thread
+is armed on your latest comment in it and fires once, on whichever comes first:
+  reply     a human other than you comments after it
   outdated  GitHub marks the thread outdated (a later commit changed its lines)
             when it wasn't outdated at arm time
-  moved     the thread was already outdated when Josh commented, the head has moved
+  moved     the thread was already outdated when you commented, the head has moved
             since, and the commits since touch the thread's file (ctx.paths_changed)
-A thread Josh resolves himself disarms silently; one resolved by someone else after
-the head moved counts as "outdated". It re-arms only when Josh comments again.
+A thread you resolve yourself disarms silently; one resolved by someone else after
+the head moved counts as "outdated". It re-arms only when you comment again.
 
 Each thread event carries `blocking` (triage/priority.py is_blocking, true when any of
-Josh's comments in the thread blocks), which colors the PR's follow-up red or yellow.
+your comments in the thread blocks), which colors the PR's follow-up red or yellow.
 
-Others' PRs also fire a "rerequest" event when Josh's review is requested again after
-his last review or comment there (`pending_rerequest`), once per request event, and a
+Others' PRs also fire a "rerequest" event when your review is requested again after
+your last review or comment there (`pending_rerequest`), once per request event, and a
 "mention" event for each human comment, review body or inline comment that @mentions
-him (`_diff_mentions`), once per item. A mention inside a thread Josh is already in
+you (`_diff_mentions`), once per item. A mention inside a thread you're already in
 is left to that thread's reply event.
 """
 
@@ -75,7 +75,7 @@ def _after_cutoff(created: str | None, cutoff: str | None) -> bool:
     return cutoff is None or (created or "") >= cutoff
 
 
-# --- Josh's own PRs -------------------------------------------------------------
+# --- Your own PRs ---------------------------------------------------------------
 
 
 def _mine_items(pr: dict, me: str) -> dict[str, dict]:
@@ -155,7 +155,7 @@ def _my_last_index(thread: dict, me: str) -> int | None:
 
 
 def thread_blocking(thread: dict, me: str) -> bool:
-    """Any of Josh's comments in the thread blocks (priority.is_blocking)."""
+    """Any of your comments in the thread blocks (priority.is_blocking)."""
     return any(priority.is_blocking(comment_kind.kind(c.get("body") or ""),
                                     c.get("review_state"))
                for c in thread["comments"] if c["author"] == me)
@@ -243,7 +243,7 @@ def _diff_threads(pr: dict, prev_threads: dict, first_sight: bool, ctx: Ctx
 
 
 def my_last_touch(pr: dict, me: str) -> str:
-    """When Josh last reviewed or commented on the PR (ISO), '' when never."""
+    """When you last reviewed or commented on the PR (ISO), '' when never."""
     stamps = [r.get("submitted_at") or "" for r in pr["reviews"]
               if r["author"] == me and r["state"] != "PENDING"]
     stamps += [c.get("created_at") or "" for c in pr["issue_comments"] if c["author"] == me]
@@ -253,8 +253,8 @@ def my_last_touch(pr: dict, me: str) -> str:
 
 
 def pending_rerequest(pr: dict, me: str) -> str:
-    """When Josh's review was first requested again after his last touch, '' when it
-    wasn't (or he has never touched the PR, which makes it a first request)."""
+    """When your review was first requested again after your last touch, '' when it
+    wasn't (or you have never touched the PR, which makes it a first request)."""
     since = my_last_touch(pr, me)
     if not since:
         return ""
@@ -287,7 +287,7 @@ def mention_re(me: str) -> re.Pattern:
 
 
 def _mention_items(pr: dict, me: str) -> list[tuple[str, str, dict, dict | None]]:
-    """(where, seen id, item, thread) for every human item that @mentions Josh."""
+    """(where, seen id, item, thread) for every human item that @mentions you."""
     rx = mention_re(me)
     items = [("issue", f"ic:{c['id']}", c, None) for c in pr["issue_comments"]]
     items += [("review", f"rv:{r['id']}", {**r, "created_at": r.get("submitted_at")}, None)
