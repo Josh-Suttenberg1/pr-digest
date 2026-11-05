@@ -609,6 +609,13 @@ def run(jid: str, cfg: dict | None = None) -> int:
         save_job(job)
         return 0
     shas, why = reapproval_plan(job, result, cfg, clone)
+    _settle_reapproval(job, shas, why)
+    return 0
+
+
+def _settle_reapproval(job: dict, shas: list[str] | None, why: str) -> None:
+    """Post the re-approval when the plan found fixing commits, record why otherwise,
+    and save the job either way."""
     job["reapproval"] = why
     if shas:
         url = reapprove(job, shas)
@@ -617,12 +624,55 @@ def run(jid: str, cfg: dict | None = None) -> int:
             save_job(job)
             import names
             who = names.book(fetch=True).get(job["actor"], job["actor"])
-            notify.banner(f"✅ Re-approved: {who} did what you asked", render.subtitle(pr),
+            notify.banner(f"✅ Re-approved: {who} did what you asked", render.subtitle(job["pr"]),
                           f"Fixed in {', '.join(s[:7] for s in shas)}", href=url)
-            return 0
+            return
         job["reapproval"] = "posting the approval failed; decide yourself"
     save_job(job)
-    return 0
+
+
+# Reasons that say re-approval isn't in play for the PR at all, so re-checking is pointless.
+NOT_IN_PLAY = ("auto re-approval is off", "not a mechanical fix",
+               "the response came from someone other than the PR author",
+               "your latest decision on the PR isn't an approval",
+               "you already approved the current head")
+
+
+def held_reapproval(snap: dict, jobs: list[dict]) -> dict | None:
+    """The job whose re-approval to re-check on this snapshot: the PR's latest finished
+    follow-up that found the fix done as asked, on the head the PR still has, and was
+    held for a reason that can change. None when there is none. Pure."""
+    held = [j for j in jobs if (j.get("pr") or {}).get("id") == snap["id"]
+            and j.get("trigger") != "mention" and _addressed(j) and j.get("status") == "ready"
+            and j.get("head") == snap.get("head")
+            and j.get("reapproval") and j["reapproval"] not in NOT_IN_PLAY]
+    return max(held, key=lambda j: j.get("finished_at") or 0) if held else None
+
+
+def recheck_reapprovals(snapshots: list[dict], jobs: list[dict], cfg: dict,
+                        dry_run: bool = False) -> list[tuple[str, str]]:
+    """Re-run the re-approval check on held follow-ups, against this tick's fresh
+    snapshots of others' PRs, so a re-approval held by someone else's change request or
+    blocking comment goes through once they're answered. Returns (job id, outcome)."""
+    if not cfg["watcher"].get("auto_reapprove", False):
+        return []
+    out = []
+    for snap in snapshots:
+        job = held_reapproval(snap, jobs)
+        if job is None:
+            continue
+        try:
+            result = json.loads(Path(job["report"]).with_suffix(".json").read_text())
+        except (OSError, ValueError, KeyError):
+            continue
+        clone = settings.path_of(cfg["repos_root"]) / job["pr"]["repo"]
+        shas, why = reapproval_plan(job, result, cfg, clone, snapshot=snap, jobs=jobs)
+        if dry_run:
+            out.append((job["id"], "would re-approve" if shas else why))
+        elif shas or why != job["reapproval"]:
+            _settle_reapproval(job, shas, why)
+            out.append((job["id"], "re-approved" if job["status"] == "reapproved" else why))
+    return out
 
 
 # --- Your actions from the menu --------------------------------------------------------

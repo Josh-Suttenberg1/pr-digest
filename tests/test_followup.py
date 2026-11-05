@@ -165,5 +165,51 @@ class ReapprovalBlockersTests(unittest.TestCase):
         self.assertEqual((shas, why), (None, "auto re-approval is off"))
 
 
+class RecheckTests(unittest.TestCase):
+    def held(self, **kw):
+        j = job("a", "T1", 1) | {"actor": AUTHOR, "arm_commit": "h0", "finished_at": 5,
+                                 "reapproval": "rev's change request is still unanswered",
+                                 "pr": {"id": "PR1", "author": AUTHOR, "repo": "ui"}}
+        return j | kw
+
+    def test_picks_the_latest_held_job_on_the_current_head(self):
+        old = self.held(id="old", finished_at=1)
+        new = self.held(id="new", finished_at=9)
+        moved = self.held(id="moved", finished_at=20, head="h1")
+        self.assertEqual(followup.held_reapproval(snap(), [old, new, moved])["id"], "new")
+
+    def test_nothing_to_recheck_when_reapproval_was_never_in_play(self):
+        for why in ("auto re-approval is off", "your latest decision on the PR isn't an approval"):
+            self.assertIsNone(followup.held_reapproval(snap(), [self.held(reapproval=why)]))
+        self.assertIsNone(followup.held_reapproval(snap(), [self.held(mechanical=False)]))
+
+    def test_goes_through_once_the_other_reviewer_is_answered(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            report = Path(d) / "r.md"
+            report.with_suffix(".json").write_text(json.dumps(
+                {"verdict": "addressed", "mechanical": True, "evidence": [{"sha": "f1"}]}))
+            j = self.held(report=str(report))
+            cfg = {"me": ME, "repos_root": d, "watcher": {"auto_reapprove": True}}
+            standing = snap([thread("T1", comment(1, ME))],
+                            reviews=[review("rev", "CHANGES_REQUESTED", "2026-01-02T00:00:00Z")])
+            answered = snap([thread("T1", comment(1, ME))],
+                            reviews=[review("rev", "CHANGES_REQUESTED", "2026-01-02T00:00:00Z"),
+                                     review("rev", "APPROVED", "2026-01-03T00:00:00Z")])
+            git = mock.Mock(return_value=mock.Mock(returncode=0, stdout="f" * 40 + "\n"))
+            with mock.patch.object(followup, "_git", git):
+                self.assertEqual(followup.recheck_reapprovals([standing], [j], cfg, dry_run=True),
+                                 [("a", "rev's change request is still unanswered")])
+                self.assertEqual(followup.recheck_reapprovals([answered], [j], cfg, dry_run=True),
+                                 [("a", "would re-approve")])
+
+    def test_off_means_no_recheck(self):
+        cfg = {"me": ME, "watcher": {"auto_reapprove": False}}
+        self.assertEqual(followup.recheck_reapprovals([snap()], [self.held()], cfg, True), [])
+
+
 if __name__ == "__main__":
     unittest.main()

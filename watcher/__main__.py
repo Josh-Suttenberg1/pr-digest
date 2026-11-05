@@ -365,6 +365,8 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
             elif e["type"] == "mention":
                 followup.enqueue_mention(e)
     jobs = [j for j in followup.all_jobs() if j["id"] not in gone_jobs]
+    rechecked = followup.recheck_reapprovals(
+        [pr for pr in detail.values() if pr["kind"] == "others"], jobs, cfg, dry_run)
     notified = {} if replay else st.get("notified", {})
     notes = notifications(detail, events, jobs, notified, state.load_cleared(), now_iso,
                           lambda pr, js: pr_priority(pr, cfg, js), seed=seeding or seed_colors)
@@ -378,6 +380,8 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
                   f"{p['pr']['repo']}#{p['pr']['number']} · {p['pr']['title']}")
         for jid, why in answered:
             print(f"-- would clear follow-up {jid}: {why}")
+        for jid, outcome in rechecked:
+            print(f"-- re-approval re-check for follow-up {jid}: {outcome}")
         print(f"-- {len(events)} event(s) on {len({e['pr']['id'] for e in events})} PR(s); "
               f"{len(ready)} notification(s) now, {len(pending)} waiting for drafts; "
               f"{len(todo)} PR(s) fetched in detail; cutoff {cutoff}")
