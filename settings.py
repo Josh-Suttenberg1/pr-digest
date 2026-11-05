@@ -45,9 +45,10 @@ DEFAULTS: dict = {
         "max_concurrent": 2,
         "followup_timeout": 600,
         "max_notifs_per_tick": 6,
-        # Re-approve a PR Josh already approved when its author did exactly what his
-        # comment asked (see watcher/followup.py reapproval_plan).
-        "auto_reapprove": True,
+        # Re-approve a PR you approved once the author has done everything your comments
+        # asked and no blocking comment or change request from anyone is unanswered
+        # (watcher/followup.py reapproval_blockers). It posts as you, so it's off by default.
+        "auto_reapprove": False,
         "bots": ["copilot-pull-request-reviewer", "avettabot"],
         "reports_dir": str(OUTPUT_DIR / "followups"),
     },

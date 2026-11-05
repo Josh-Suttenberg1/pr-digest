@@ -49,7 +49,7 @@ query($ids: [ID!]!) {
     latestOpinionatedReviews(first: 20, writersOnly: true) {
       nodes { state author { login __typename } } }
     reviews(last: 100) { nodes {
-      databaseId state submittedAt body url author { login __typename } } }
+      databaseId state submittedAt body url author { login __typename } commit { oid } } }
     comments(last: 100) { nodes {
       databaseId createdAt body url author { login __typename } } }
     timelineItems(last: 30, itemTypes: [REVIEW_REQUESTED_EVENT]) { nodes {
@@ -150,6 +150,7 @@ def normalize_pr(node: dict, kind: str, bots: set[str], extra_threads: list[dict
         reviews.append({
             "id": r["databaseId"], "state": r["state"], "submitted_at": r.get("submittedAt"),
             "body": r.get("body") or "", "url": r.get("url"),
+            "commit": (r.get("commit") or {}).get("oid"),
             "author": (author or {}).get("login", ""), "is_bot": _is_bot(author, bots),
         })
     opinions = [n for n in (node.get("latestOpinionatedReviews") or {}).get("nodes") or []

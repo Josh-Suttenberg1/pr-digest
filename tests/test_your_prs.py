@@ -35,6 +35,10 @@ class CommentKindTest(unittest.TestCase):
             "Looks off to me.": "comment",
             "Nit picking aside, this is fine.": "comment",
             "Use this:\n```suggestion\nval x = 1\n```": "suggestion",
+            "**Comment 1 · Suggestion:** rename this": "suggestion",
+            "**Comment 10 · Nit:** spacing": "nit",
+            "Comment 2 - Blocking: drops rows": "blocking",
+            "Comment 3 is wrong": "comment",
         }
         for body, want in cases.items():
             self.assertEqual(ck.kind(body), want, body)
@@ -42,6 +46,7 @@ class CommentKindTest(unittest.TestCase):
     def test_summary_drops_the_label_and_emphasis(self):
         self.assertEqual(ck.summary("**Suggestion:** No test calls `f`.\n\n*(Drafted)*"),
                          "No test calls `f`.")
+        self.assertEqual(ck.summary("**Comment 4 · Nit:** spacing"), "spacing")
 
     def test_phrase_orders_decisions_before_nits(self):
         self.assertEqual(ck.phrase(["nit", "suggestion", "nit", "suggestion", "nit"]),
@@ -207,6 +212,21 @@ def w_thread(cid, body, author="plaxdan"):
             "comments": [{"id": cid, "author": author, "is_bot": False,
                           "created_at": "2026-11-04T16:58:00Z", "url": f"{PR}#discussion_r{cid}",
                           "body": body, "commit": "c", "original_commit": "c"}]}
+
+
+class ReapprovalHoldTest(unittest.TestCase):
+    def test_latest_checked_reason_shows(self):
+        jobs = [{"status": "ready", "finished_at": 1, "reapproval": "1 of your comments isn't addressed yet"},
+                {"status": "ready", "finished_at": 2, "reapproval": "rev's change request is still unanswered"},
+                {"status": "running"}]
+        self.assertEqual(menu.reapproval_hold(jobs),
+                         "Not re-approving: rev's change request is still unanswered")
+
+    def test_nothing_when_off_or_unchecked(self):
+        self.assertEqual(menu.reapproval_hold([{"status": "ready", "reapproval": "auto re-approval is off"}]), "")
+        self.assertEqual(menu.reapproval_hold([{"status": "queued"}]), "")
+        self.assertEqual(menu.reapproval_hold(
+            [{"status": "ready", "reapproval": "your latest decision on the PR isn't an approval"}]), "")
 
 
 class NotificationTest(unittest.TestCase):

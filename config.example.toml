@@ -24,7 +24,10 @@ required_approvals = 2
 max_concurrent = 2               # follow-up runs at once
 followup_timeout = 600           # seconds
 max_notifs_per_tick = 6
-auto_reapprove = true            # re-approve when the author did exactly what your comment asked
+# Re-approve for you after the author pushes, but only once they've done everything your
+# comments asked and every blocking comment or change request on the PR, from any
+# reviewer, has been answered.
+auto_reapprove = false
 bots = ["copilot-pull-request-reviewer", "avettabot"]
 # reports_dir = "~/somewhere"   # default: output/followups in this checkout
 

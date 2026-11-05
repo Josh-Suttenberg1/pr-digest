@@ -351,46 +351,117 @@ def reapproval_body(repo: str, shas: list[str]) -> str:
     return f"Reapproving, {lead} my comment.\n\n{FOOTER}"
 
 
-def _josh_reviews(repo: str, number: int) -> list[dict] | None:
-    proc = subprocess.run(["gh", "api", f"repos/avetta/{repo}/pulls/{number}/reviews",
-                           "--paginate", "--jq", ".[]"], capture_output=True, text=True)
-    if proc.returncode != 0:
-        return None
-    return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+DONE_JOBS = ("ready", "reapproved", "posted")
 
 
-def reapproval_plan(job: dict, result: dict, cfg: dict, clone: Path) -> tuple[list[str] | None, str]:
-    """(fix commit shas to cite, reason). shas is None when Josh must decide himself.
+def _addressed(job: dict) -> bool:
+    return (job.get("status") in DONE_JOBS and job.get("verdict") == "addressed"
+            and job.get("mechanical") is True)
 
-    Re-approve only when the author did exactly what Josh's comment asked, Josh's latest
-    decision on the PR is an approval that predates the current head, and the head
-    hasn't moved since the follow-up looked at it.
+
+def _names(logins: list[str]) -> str:
+    logins = sorted(set(logins))
+    return logins[0] if len(logins) == 1 else f"{', '.join(logins[:-1])} and {logins[-1]}"
+
+
+def reapproval_blockers(snap: dict, job: dict, jobs: list[dict], me: str) -> list[str]:
+    """Why the PR can't be re-approved for you yet; empty when it can. Pure: `snap` is
+    a fresh watcher snapshot (watcher/gh.py normalize_pr), `jobs` every follow-up job.
+
+    All of these must hold:
+    - the PR is open and its head is the one the follow-up checked;
+    - your latest decision is an approval given on an older commit;
+    - every unresolved thread with a comment of yours has a follow-up, armed on your
+      latest comment there, that found the author did exactly what you asked;
+    - no other reviewer has a change request standing that hasn't been re-requested
+      since, and no unresolved thread holds another reviewer's blocking comment with
+      someone other than the author having the last word.
+    """
+    from triage import comment_kind, priority
+
+    author = snap["author"]
+    if snap.get("state") != "OPEN" or snap.get("head") != job["head"]:
+        return ["the PR moved or closed after the follow-up ran"]
+    decisions = [r for r in snap["reviews"] if r["author"] == me
+                 and r["state"] in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")]
+    if not decisions or decisions[-1]["state"] != "APPROVED":
+        return ["your latest decision on the PR isn't an approval"]
+    if decisions[-1].get("commit") == job["head"]:
+        return ["you already approved the current head"]
+
+    why = []
+    pr_jobs = [j for j in jobs if (j.get("pr") or {}).get("id") == snap["id"]
+               and j.get("trigger") != "mention"]
+    unaddressed = 0
+    for t in snap["threads"]:
+        humans = [c for c in t["comments"] if not c["is_bot"]]
+        mine = [c for c in humans if c["author"] == me]
+        if t["resolved"] or not mine:
+            continue
+        latest = mine[-1]["id"]
+        if not any(j["thread_id"] == t["id"] and j.get("arm_id") == latest
+                   and (j["id"] == job["id"] or _addressed(j)) for j in pr_jobs):
+            unaddressed += 1
+    if unaddressed:
+        why.append(f"{unaddressed} of your comments {'isn' if unaddressed == 1 else 'aren'}'t "
+                   f"addressed yet")
+
+    latest_decision: dict[str, dict] = {}
+    for r in snap["reviews"]:
+        if (not r["is_bot"] and r["author"] not in (me, author)
+                and r["state"] in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")):
+            latest_decision[r["author"]] = r
+    standing = [who for who, r in latest_decision.items() if r["state"] == "CHANGES_REQUESTED"
+                and not any(q["reviewer"] == who and (q.get("at") or "") > (r.get("submitted_at") or "")
+                            for q in snap.get("review_requests") or [])]
+    if standing:
+        why.append(f"{_names(standing)}'s change request{'s are' if len(set(standing)) > 1 else ' is'} "
+                   f"still unanswered")
+
+    blocked_by = []
+    for t in snap["threads"]:
+        humans = [c for c in t["comments"] if not c["is_bot"]]
+        if t["resolved"] or not humans or any(c["author"] == me for c in humans):
+            continue
+        if humans[-1]["author"] == author:
+            continue
+        blockers = [c["author"] for c in humans if c["author"] != author
+                    and priority.is_blocking(comment_kind.kind(c["body"]), c.get("review_state"))]
+        blocked_by += blockers[:1]
+    if blocked_by:
+        n = len(blocked_by)
+        why.append(f"{_names(blocked_by)}'s blocking comment{'s are' if n > 1 else ' is'} still unanswered")
+    return why
+
+
+def reapproval_plan(job: dict, result: dict, cfg: dict, clone: Path,
+                    snapshot=None, jobs=None) -> tuple[list[str] | None, str]:
+    """(fix commit shas to cite, reason). shas is None when you must decide yourself.
+
+    The follow-up must find that the author did exactly what your comment asked, the
+    response must come from the author, reapproval_blockers must find nothing on a
+    fresh snapshot of the PR, and a fixing commit must sit between your comment and
+    the head. `snapshot` and `jobs` stand in for the GitHub fetch and the job store.
     """
     pr = job["pr"]
-    if not cfg["watcher"].get("auto_reapprove", True):
+    if not cfg["watcher"].get("auto_reapprove", False):
         return None, "auto re-approval is off"
     if result["verdict"] != "addressed" or not result["mechanical"]:
         return None, "not a mechanical fix"
     if job["actor"] != pr["author"]:
         return None, "the response came from someone other than the PR author"
-    view = subprocess.run(["gh", "pr", "view", str(pr["number"]), "--repo", f"avetta/{pr['repo']}",
-                           "--json", "state,headRefOid"], capture_output=True, text=True)
-    try:
-        live = json.loads(view.stdout)
-    except ValueError:
-        return None, "couldn't read the PR"
-    if live.get("state") != "OPEN" or live.get("headRefOid") != job["head"]:
-        return None, "the PR moved or closed after the follow-up ran"
-    me = cfg["me"]
-    reviews = _josh_reviews(pr["repo"], pr["number"])
-    if reviews is None:
-        return None, "couldn't read the reviews"
-    mine = [r for r in reviews if (r.get("user") or {}).get("login") == me
-            and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")]
-    if not mine or mine[-1]["state"] != "APPROVED":
-        return None, "your latest decision on the PR isn't an approval"
-    if mine[-1].get("commit_id") == job["head"]:
-        return None, "you already approved the current head"
+    if snapshot is None:
+        from watcher import gh
+        try:
+            snapshot = gh.details({pr["id"]: "others"}, set(cfg["watcher"]["bots"]),
+                                  gh.token()).get(pr["id"])
+        except (gh.GhError, gh.gh_prs.DigestError):
+            snapshot = None
+        if snapshot is None:
+            return None, "couldn't read the PR"
+    why = reapproval_blockers(snapshot, job, all_jobs() if jobs is None else jobs, cfg["me"])
+    if why:
+        return None, "; ".join(why)
     shas = []
     for e in result["evidence"]:
         sha = str(e.get("sha") or "").strip()
@@ -404,7 +475,7 @@ def reapproval_plan(job: dict, result: dict, cfg: dict, clone: Path) -> tuple[li
             shas.append(full)
     if not shas:
         return None, "no fixing commit between your comment and the head"
-    return shas, "mechanical fix on a PR you approved"
+    return shas, "every comment of yours is addressed and nothing blocking is left"
 
 
 def reapprove(job: dict, shas: list[str]) -> str | None:

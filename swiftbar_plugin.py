@@ -741,6 +741,21 @@ def _response_detail(job: dict) -> None:
          terminal="false", refresh="true")
 
 
+# Reasons that mean re-approval was never in play, so the menu doesn't mention them.
+_NOT_IN_PLAY = ("auto re-approval is off", "your latest decision on the PR isn't an approval",
+                "you already approved the current head")
+
+
+def reapproval_hold(jobs: list[dict]) -> str:
+    """'Not re-approving: <why>' from the latest checked job, when you approved the PR,
+    automatic re-approval is on, and something holds it; '' otherwise."""
+    checked = [j for j in jobs if j.get("status") == "ready" and j.get("reapproval")]
+    if not checked:
+        return ""
+    why = max(checked, key=lambda j: j.get("finished_at") or 0)["reapproval"]
+    return "" if why in _NOT_IN_PLAY else f"Not re-approving: {why}"
+
+
 def followup_block(e: dict, nick: dict[str, str]) -> None:
     """Others' PR you reviewed, where someone responded: every response in one place,
     each with its own submenu, then the PR's actions."""
@@ -763,6 +778,9 @@ def followup_block(e: dict, nick: dict[str, str]) -> None:
         if ready and len(ready) == len(jobs):
             emit("--Claude drafted a reply to " + ("it" if len(jobs) == 1 else "each"),
                  color="#888888")
+        held = reapproval_hold(jobs)
+        if held:
+            emit(f"--{truncate(sanitize(held), 110)}", color="#888888")
     emit("-----")
     ready = [j for j in jobs if j["status"] == "ready"]
     if len(ready) == 1:
