@@ -14,9 +14,8 @@ logged out) keep their own plain banners.
 
 from __future__ import annotations
 
-import re
+from triage.priority import TICKET_RE
 
-TICKET_RE = re.compile(r"\b(?:CONN|WS)-\d+\b")
 TITLE_MAX = 40
 
 

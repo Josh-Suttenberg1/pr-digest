@@ -193,6 +193,10 @@ class RenderAndStateTests(unittest.TestCase):
                          "CONN-1555 · Delete step safeguard lists calculation…")
         self.assertEqual(render.subtitle({"title": "no key", "repo": "ui", "number": 7}), "ui#7 · no key")
 
+    def test_subtitle_recognizes_any_teams_ticket_key(self):
+        self.assertEqual(render.subtitle({"title": "ABC-77: Short title", "repo": "ui", "number": 1}),
+                         "ABC-77 · Short title")
+
     def test_backoff_schedule(self):
         self.assertEqual([state.backoff_delay(n) for n in (1, 2, 3, 4, 9)], [120, 240, 480, 1800, 1800])
 
