@@ -1,16 +1,16 @@
 # Copy to ~/.config/pr-digest/config.toml. Every key is optional; settings.py holds the
 # defaults. The reviewer's model and effort live in the agent files
-# (~/avetta/.claude/agents/pr-reviewer.md and pr-review-verifier.md), not here.
+# (<workspace>/.claude/agents/ or ~/.claude/agents/), not here.
 
 me = "your-github-login"
 org = "avetta"
-repos_root = "~/avetta"          # local clones live at <repos_root>/<repo>
-claude_cwd = "~/avetta"          # headless claude runs start here, so its CLAUDE.md loads
+workspace = "~/work"            # the folder you start Claude in: its CLAUDE.md and .claude/agents/ load
+# repos_root = "~/code"          # only if your clones aren't at <workspace>/<repo>
 
 [review]
 reviewer_agent = "pr-reviewer"
 verifier_agent = "pr-review-verifier"
-drafts_dir = "~/avetta/JoshWorkspace/code_reviews"
+# drafts_dir = "~/somewhere"    # default: output/reviews in this checkout
 timeout = 3600                   # seconds, per agent run
 max_concurrent = 2               # reviews running at once; more wait for a free slot
 
@@ -26,16 +26,16 @@ followup_timeout = 600           # seconds
 max_notifs_per_tick = 6
 auto_reapprove = true            # re-approve when the author did exactly what your comment asked
 bots = ["copilot-pull-request-reviewer", "avettabot"]
-reports_dir = "~/avetta/JoshWorkspace/pr_followups"
+# reports_dir = "~/somewhere"   # default: output/followups in this checkout
 
 [triage]                         # sorting PRs into "reviews you owe" vs everything else
 pod = []                         # GitHub logins whose PRs rank higher, e.g. ["teammate"]
 ci_ignored = []                  # check names (substrings) whose failure doesn't park a PR
 
 [lessons]
-repos = ["processservice", "process-domain", "ui", "workerbridgeservice"]
+repos = []                       # repos to harvest review lessons from; empty = off
 days = 90
-out_dir = "~/avetta/JoshWorkspace/review_lessons"
+# out_dir = "~/somewhere"       # default: output/lessons in this checkout
 
 [priority]                       # the menu's red / yellow / green dots
 stale_after_days = 2             # a review you owe turns yellow after waiting this long…

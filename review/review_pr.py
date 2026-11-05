@@ -7,7 +7,8 @@ This is the one entry point for every review: the menu bar button, /reviews,
 and interactive "review <ticket key>" sessions all call it. Steps:
 
 1. Check that the claude CLI is logged in.
-2. claude -p --agent pr-reviewer, from claude_cwd so the Avetta CLAUDE.md loads.
+2. claude -p --agent <review.reviewer_agent>, from the workspace so its CLAUDE.md
+   and .claude/agents/ load.
    With --reviewer-output, an interactive session already wrote that report by
    following the agent file, and this step is skipped.
 3. claude -p --agent pr-review-verifier on the reviewer's output, only when it has
@@ -16,8 +17,8 @@ and interactive "review <ticket key>" sessions all call it. Steps:
    <KEY>-story.md when one ticket covered several PRs, and an index entry per PR
    in state/reviews/ for the menu bar.
 
-The model and effort come from each agent's frontmatter in
-~/avetta/.claude/agents/. stdout is one JSON summary line; failures exit non-zero
+The model and effort come from each agent's frontmatter, in
+<workspace>/.claude/agents/ or ~/.claude/agents/. stdout is one JSON summary line; failures exit non-zero
 with the reason as the last stderr line.
 """
 
@@ -276,7 +277,7 @@ def review(target: str, phase_file: Path | None, refresh_plugin: str | None,
     the agent file itself; the reviewer run is skipped and only the verifier runs.
     """
     rcfg = cfg["review"]
-    cwd = settings.path_of(cfg["claude_cwd"])
+    cwd = settings.workspace(cfg)
     started = time.time()
     run_dir = RUNS_DIR / f"{datetime.now():%Y%m%d-%H%M%S}-{_slug(target)}"
     run_dir.mkdir(parents=True, exist_ok=True)

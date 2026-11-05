@@ -50,7 +50,7 @@ from pathlib import Path
 import settings
 
 ORG = "avetta"
-REPOS_ROOT = Path.home() / "avetta"
+REPOS_ROOT = Path.home()
 # At or above this many distinct approvals, with no change request standing, a PR is
 # hidden from the review list.
 WELL_APPROVED = 2
@@ -84,7 +84,7 @@ def configure(cfg: dict | None = None) -> None:
     global ORG, REPOS_ROOT, WELL_APPROVED, POD, CI_IGNORED, NICKNAMES, BOTS
     cfg = cfg if cfg is not None else settings.load()
     ORG = cfg.get("org") or ORG
-    REPOS_ROOT = settings.path_of(cfg.get("repos_root") or str(REPOS_ROOT))
+    REPOS_ROOT = settings.path_of(cfg.get("repos_root") or cfg.get("workspace") or str(REPOS_ROOT))
     WELL_APPROVED = int((cfg.get("watcher") or {}).get("required_approvals", WELL_APPROVED))
     tri = cfg.get("triage") or {}
     POD = set(tri.get("pod") or [])

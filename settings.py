@@ -17,16 +17,21 @@ CONFIG_PATH = Path(
 
 REPO_DIR = Path(__file__).resolve().parent
 STATE_DIR = REPO_DIR / "state"
+OUTPUT_DIR = REPO_DIR / "output"
 
 DEFAULTS: dict = {
     "me": "",
     "org": "avetta",
-    "repos_root": "~/avetta",
-    "claude_cwd": "~/avetta",
+    # The folder you start Claude in. Headless runs and "Open in Claude" sessions start
+    # here, so they load its CLAUDE.md and its .claude/agents/; the lessons harvest reads
+    # and writes <workspace>/.claude/review/.
+    "workspace": "~",
+    # Where repo clones live, as <repos_root>/<repo>. Empty means the workspace.
+    "repos_root": "",
     "review": {
         "reviewer_agent": "pr-reviewer",
         "verifier_agent": "pr-review-verifier",
-        "drafts_dir": "~/avetta/JoshWorkspace/code_reviews",
+        "drafts_dir": str(OUTPUT_DIR / "reviews"),
         "timeout": 3600,
         "max_concurrent": 2,
     },
@@ -44,7 +49,7 @@ DEFAULTS: dict = {
         # comment asked (see watcher/followup.py reapproval_plan).
         "auto_reapprove": True,
         "bots": ["copilot-pull-request-reviewer", "avettabot"],
-        "reports_dir": "~/avetta/JoshWorkspace/pr_followups",
+        "reports_dir": str(OUTPUT_DIR / "followups"),
     },
     "triage": {
         # Authors whose PRs rank higher in the reviews-you-owe list.
@@ -53,9 +58,10 @@ DEFAULTS: dict = {
         "ci_ignored": [],
     },
     "lessons": {
-        "repos": ["processservice", "process-domain", "ui", "workerbridgeservice"],
+        # Repos whose review threads are harvested; empty means the harvest does nothing.
+        "repos": [],
         "days": 90,
-        "out_dir": "~/avetta/JoshWorkspace/review_lessons",
+        "out_dir": str(OUTPUT_DIR / "lessons"),
     },
     "notify": {
         "swiftbar_plugin": "prdigest.1h.sh",
@@ -90,12 +96,25 @@ def _merge(base: dict, override: dict) -> dict:
 
 
 def load(path: Path = CONFIG_PATH) -> dict:
-    """Defaults overlaid with the user's config file, when it exists."""
+    """Defaults overlaid with the user's config file, when it exists. repos_root is
+    filled in from workspace when the file leaves it empty."""
+    user: dict = {}
     if path.exists():
         with path.open("rb") as f:
-            return _merge(DEFAULTS, tomllib.load(f))
-    return _merge(DEFAULTS, {})
+            user = tomllib.load(f)
+    cfg = _merge(DEFAULTS, user)
+    cfg["repos_root"] = cfg["repos_root"] or cfg["workspace"]
+    return cfg
 
 
 def path_of(value: str) -> Path:
     return Path(value).expanduser()
+
+
+def workspace(cfg: dict) -> Path:
+    return path_of(cfg["workspace"])
+
+
+def review_notes_dir(cfg: dict) -> Path:
+    """Where the reviewer's hand-kept and harvested notes live."""
+    return workspace(cfg) / ".claude" / "review"

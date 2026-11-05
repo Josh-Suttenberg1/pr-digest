@@ -5,8 +5,8 @@ the prdigest://respond link, see respond_url):
 
     .venv/bin/python session.py --prompt "Let's go over the draft review for ..."
 
-The tab starts in the configured claude_cwd (~/avetta), so the session loads
-the same CLAUDE.md files as one Josh starts by hand.
+The tab starts in the configured workspace, so the session loads the same
+CLAUDE.md files and agents as one you start there by hand.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def respond_prompt(pr_url: str) -> str:
     return (f"Let's go through the review comments waiting on me on my PR {pr_url}. "
             f"Every comment's full text, and who approved or requested changes, is in "
             f"{status_report.path_for(pr_url)}; if its 'Status as of' time predates the "
-            f"newest comment, refresh with my-pr-followups.py --comments. Walk me through "
+            f"newest comment, read the PR's comments from GitHub instead. Walk me through "
             f"each comment with your take on it. Don't change code or post anything until "
             f"I say.")
 
@@ -64,7 +64,7 @@ def respond_url(pr_url: str) -> str:
 
 def launch(prompt: str, cfg: dict | None = None, run=subprocess.run) -> int:
     cfg = cfg or settings.load()
-    cwd = str(settings.path_of(cfg["claude_cwd"]))
+    cwd = str(settings.workspace(cfg))
     script = iterm_script(claude_command(prompt, cwd))
     return run(["osascript", "-e", script], capture_output=True).returncode
 

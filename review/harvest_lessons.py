@@ -16,11 +16,12 @@ launchd runs it with --apply every Monday morning (com.josh.pr-digest-lessons, w
 2. Propose (claude -p on models.lessons). The threads are too many for one context,
    so chunks of CHUNK threads each yield candidate rules (candidates-<date>.json),
    then one run merges them, drops anything a repo's .ai/ files, the recurring checks,
-   or Josh's pinned lessons already cover, and writes <out_dir>/proposals-<date>.json.
+   or your pinned lessons already cover, and writes <out_dir>/proposals-<date>.json.
 
 3. Apply (--apply, deterministic). Lessons backed by MIN_THREADS+ threads from
    MIN_REVIEWERS+ distinct reviewers, strongest MAX_LESSONS first, replace the auto block
-   of review-lessons.md; Josh's pinned lines outside it are never touched. A banner
+   of <workspace>/.claude/review/review-lessons.md; your pinned lines outside it are
+   never touched. A banner
    reports what was added and removed. Nothing is written to any repo's .ai/ files;
    lessons that belong there are marked as candidates.
 """
@@ -39,8 +40,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import notify  # noqa: E402
 import settings  # noqa: E402
 
-LESSONS_FILE = Path("~/avetta/.claude/review/review-lessons.md").expanduser()
-CHECKS_FILE = Path("~/avetta/.claude/review/recurring-checks.md").expanduser()
+LESSONS_NAME = "review-lessons.md"
+CHECKS_NAME = "recurring-checks.md"
 BODY_LIMIT = 800
 PAGE = 20
 
@@ -132,7 +133,7 @@ def harvest(cfg: dict, days: int) -> list[dict]:
 CHUNK = 250
 MAP_WORKERS = 3
 
-MAP_PROMPT = """Below are {n} code-review threads from Josh's repos, one JSON object per line.
+MAP_PROMPT = """Below are {n} code-review threads from your team's repos, one JSON object per line.
 Each is a comment a human reviewer left that the PR author then acted on (the commented lines
 changed afterwards).
 
@@ -151,17 +152,17 @@ THREADS:
 PROPOSE_PROMPT = """You are distilling code-review lessons for the pr-reviewer agent.
 
 {candidates} holds candidate rules, each with the review-thread URLs behind it. They were
-extracted chunk by chunk from {n} review threads over the last {days} days on Josh's repos;
+extracted chunk by chunk from {n} review threads over the last {days} days on your team's repos;
 every thread is a comment a human reviewer left that the PR author then acted on.
 
 First merge candidates that state the same rule (union their URLs, repos and reviewers). Keep
 only rules backed by at least 3 threads, ideally from more than one reviewer.
 
 For each remaining rule, check whether it is already covered, and drop it if so:
-- the touched repo's .ai/ files (~/avetta/<repo>/.ai/*.md) and its CLAUDE.md / .claude/CLAUDE.md
+- the touched repo's .ai/ files ({workspace}/<repo>/.ai/*.md) and its CLAUDE.md / .claude/CLAUDE.md
 - {checks}
-- ~/avetta/.claude/elm-conventions.md (for ui)
-- these lessons Josh pinned by hand:
+- any conventions docs under {workspace}/.claude/ (e.g. *-conventions.md)
+- these lessons you pinned by hand:
 {pinned}
 
 Output ONLY a JSON object, no prose, no code fences:
@@ -174,7 +175,7 @@ Output ONLY a JSON object, no prose, no code fences:
 Strongest first, at most 25 lessons.
 """
 
-# review-lessons.md: Josh's pinned lessons above AUTO_START are kept as written; the
+# review-lessons.md: your pinned lessons above AUTO_START are kept as written; the
 # block between the markers is rewritten by each --apply run.
 AUTO_START = "<!-- auto-lessons:start (rewritten weekly by harvest_lessons.py --apply) -->"
 AUTO_END = "<!-- auto-lessons:end -->"
@@ -193,7 +194,7 @@ def _claude(cfg: dict, prompt: str, tools: bool) -> str:
         argv += ["--disallowedTools", "Read", "Grep", "Glob", "Edit", "Write", "Bash", "Agent",
                  "WebFetch", "WebSearch"]
     proc = subprocess.run(argv, input=prompt, capture_output=True, text=True,
-                          cwd=settings.path_of(cfg["claude_cwd"]), timeout=3600)
+                          cwd=settings.workspace(cfg), timeout=3600)
     envelope = json.loads(proc.stdout or "{}")
     if envelope.get("is_error") or not envelope.get("result"):
         raise SystemExit(f"claude run failed: {str(envelope.get('result'))[:300] or proc.stderr[-300:]}")
@@ -235,9 +236,11 @@ def propose(cfg: dict, threads: list[dict], days: int, out_dir: Path) -> Path:
 
     candidates_path = out_dir / f"candidates-{date.today()}.json"
     candidates_path.write_text(json.dumps(candidates, indent=2) + "\n")
-    pinned = pinned_lessons(LESSONS_FILE.read_text() if LESSONS_FILE.exists() else "")
+    lessons_file = settings.review_notes_dir(cfg) / LESSONS_NAME
+    pinned = pinned_lessons(lessons_file.read_text() if lessons_file.exists() else "")
     prompt = PROPOSE_PROMPT.format(
-        candidates=candidates_path, n=len(threads), days=days, checks=CHECKS_FILE,
+        candidates=candidates_path, n=len(threads), days=days,
+        checks=settings.review_notes_dir(cfg) / CHECKS_NAME, workspace=settings.workspace(cfg),
         pinned="\n".join(f"  {line}" for line in pinned) or "  (none)",
     )
     result = parse_proposals(_claude(cfg, prompt, tools=True))
@@ -259,7 +262,7 @@ def parse_proposals(text: str) -> dict:
 
 
 def pinned_lessons(text: str) -> list[str]:
-    """Josh's own lesson lines: every `- ` line outside the auto-generated block."""
+    """Your own lesson lines: every `- ` line outside the auto-generated block."""
     if AUTO_START in text:
         text = text.split(AUTO_START)[0] + text.split(AUTO_END)[-1]
     return [line.strip() for line in text.splitlines() if line.strip().startswith("- ")]
@@ -332,15 +335,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"proposals → {proposals_path}", file=sys.stderr)
     if args.apply:
         lessons = qualifying(json.loads(proposals_path.read_text())["lessons"])
-        old = LESSONS_FILE.read_text()
+        lessons_file = settings.review_notes_dir(cfg) / LESSONS_NAME
+        lessons_file.parent.mkdir(parents=True, exist_ok=True)
+        old = lessons_file.read_text() if lessons_file.exists() else ""
         new = apply_lessons(old, lessons, str(date.today()))
-        LESSONS_FILE.write_text(new)
+        lessons_file.write_text(new)
         added, removed = changed_rules(old, new)
         print(f"review-lessons.md: {len(lessons)} auto lessons (+{len(added)} / −{len(removed)})",
               file=sys.stderr)
         if added or removed:
             notify.banner("📚 Review lessons updated", f"+{len(added)} / −{len(removed)} lessons",
-                          (added or removed)[0][2:120], href=LESSONS_FILE.as_uri())
+                          (added or removed)[0][2:120], href=lessons_file.as_uri())
     return 0
 
 

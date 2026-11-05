@@ -514,7 +514,7 @@ def run(jid: str, cfg: dict | None = None) -> int:
                 "--disallowedTools", "Write", "Edit", "Bash(gh:*)", "Bash(curl:*)",
                 "Bash(git push:*)", "WebFetch", "WebSearch", "Agent"]
         proc = subprocess.run(argv, input=prompt, capture_output=True, text=True,
-                              cwd=settings.path_of(cfg["claude_cwd"]), env=_env(),
+                              cwd=settings.workspace(cfg), env=_env(),
                               timeout=cfg["watcher"]["followup_timeout"])
         envelope = json.loads(proc.stdout or "{}")
         if envelope.get("is_error") or not envelope.get("result"):

@@ -145,7 +145,7 @@ class InSessionReviewerTests(unittest.TestCase):
             report_path = d / "report.md"
             report_path.write_text("Some preamble.\n\n" + report)
             cfg = {
-                "claude_cwd": str(d),
+                "workspace": str(d),
                 "review": {
                     "reviewer_agent": "pr-reviewer", "verifier_agent": "pr-review-verifier",
                     "timeout": 60, "max_concurrent": 1, "drafts_dir": str(d / "drafts"),
