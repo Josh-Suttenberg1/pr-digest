@@ -38,7 +38,7 @@ import session  # noqa: E402
 import settings  # noqa: E402
 
 REPO_DIR = Path(__file__).resolve().parent.parent
-OUT_DIR = settings.OUTPUT_DIR / "drafts-html"
+OUT_DIR = REPO_DIR / "output" / "drafts-html"
 SCHEME = "prdigest"
 
 _PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")

@@ -15,30 +15,8 @@ CONFIG_PATH = Path(
     os.environ.get("PR_DIGEST_CONFIG", "~/.config/pr-digest/config.toml")
 ).expanduser()
 
-# Code and data live apart. REPO_DIR is where this code runs from: the checkout while
-# developing, or an installed release (bin/deploy) under <install>/releases/<sha>.
-# DATA_DIR holds everything the code writes or reads as data (state/, output/, .env,
-# review-drafter/state/): $PR_DIGEST_DATA, else the path a release records in its
-# `.data_dir` file, else the checkout itself.
 REPO_DIR = Path(__file__).resolve().parent
-
-
-def _data_dir() -> Path:
-    env = os.environ.get("PR_DIGEST_DATA", "").strip()
-    if env:
-        return Path(env).expanduser()
-    marker = REPO_DIR / ".data_dir"
-    if marker.exists():
-        return Path(marker.read_text().strip()).expanduser()
-    return REPO_DIR
-
-
-DATA_DIR = _data_dir()
-STATE_DIR = DATA_DIR / "state"
-OUTPUT_DIR = DATA_DIR / "output"
-# The path SwiftBar, launchd and menu actions run the code through: an installed
-# release's `current` link, so a deploy switches them all at once; else the checkout.
-RUN_DIR = REPO_DIR.parent.parent / "current" if REPO_DIR.parent.name == "releases" else REPO_DIR
+STATE_DIR = REPO_DIR / "state"
 
 DEFAULTS: dict = {
     "me": "",

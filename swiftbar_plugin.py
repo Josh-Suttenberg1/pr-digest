@@ -55,19 +55,13 @@ from pathlib import Path
 REPO_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_DIR))
 
-import settings  # noqa: E402
 from triage import priority  # noqa: E402
-
-# Menu actions run through RUN_DIR (an installed release's `current` link), so a
-# deploy switches them along with the menu; data comes from settings.DATA_DIR.
-RUN_DIR = settings.RUN_DIR
-PYTHON = str(RUN_DIR / ".venv" / "bin" / "python")
-LAUNCHER = RUN_DIR / "swiftbar-plugins" / "prdigest.1h.sh"
+LAUNCHER = REPO_DIR / "swiftbar-plugins" / "prdigest.1h.sh"
 PLUGIN_ID = "prdigest.1h.sh"  # unique id for swiftbar://refreshplugin
-REVIEW_MENU = RUN_DIR / "review-drafter" / "menubar.sh"            # review actions backend
-REVIEW_STATE = settings.DATA_DIR / "review-drafter" / "state"       # inflight-/phase-/fail-<key>
-REVIEW_INDEX = settings.STATE_DIR / "reviews"                       # <repo>#<n>.json per review
-WATCHER = RUN_DIR / "bin" / "watcher"
+REVIEW_MENU = REPO_DIR / "review-drafter" / "menubar.sh"   # review actions backend
+REVIEW_STATE = REPO_DIR / "review-drafter" / "state"       # inflight-/phase-/fail-<key>
+REVIEW_INDEX = REPO_DIR / "state" / "reviews"              # <repo>#<n>.json per review
+WATCHER = REPO_DIR / "bin" / "watcher"
 TITLE_MAX = 60
 
 # Refetch when the cached data is older than this (seconds). A full triage takes about
@@ -81,10 +75,8 @@ MARKER_TTL = 600
 # State: a per-plugin dir holding cache.json and the in-flight marker.
 # --------------------------------------------------------------------------- #
 def state_dir() -> Path:
-    """The menu's cache, in-flight marker and dismissals: state/menu under the data
-    directory, or $PR_DIGEST_MENU_DIR (for rendering against scratch data)."""
-    base = os.environ.get("PR_DIGEST_MENU_DIR", "").strip()
-    directory = Path(base) if base else settings.STATE_DIR / "menu"
+    base = os.environ.get("SWIFTBAR_PLUGIN_DATA_PATH", "").strip()
+    directory = Path(base) if base else REPO_DIR / "state"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
@@ -678,15 +670,15 @@ def _respond_prompt(pr_url: str) -> str:
 
 def _claude_item(text: str, prompt: str) -> None:
     """A menu item that opens a Claude session in iTerm primed with `prompt`."""
-    emit(text, bash=PYTHON,
-         param1=str(RUN_DIR / "session.py"), param2="--prompt", param3=prompt,
+    emit(text, bash=str(REPO_DIR / ".venv" / "bin" / "python"),
+         param1=str(REPO_DIR / "session.py"), param2="--prompt", param3=prompt,
          terminal="false")
 
 
 def _read_item(text: str, md_path: str) -> None:
     """Open a draft or report as a rendered page in the browser (review/view_draft.py)."""
-    emit(text, bash=PYTHON,
-         param1=str(RUN_DIR / "review" / "view_draft.py"), param2=md_path, terminal="false")
+    emit(text, bash=str(REPO_DIR / ".venv" / "bin" / "python"),
+         param1=str(REPO_DIR / "review" / "view_draft.py"), param2=md_path, terminal="false")
 
 
 def _dismiss_line(label: str, **action: str) -> None:
@@ -917,7 +909,7 @@ def _followup_jobs() -> list[dict]:
 
 def watcher_label() -> str:
     """One footer line on the watcher's health, from its state file."""
-    path = settings.STATE_DIR / "watcher" / "state.json"
+    path = REPO_DIR / "state" / "watcher" / "state.json"
     try:
         st = json.loads(path.read_text())
     except (OSError, ValueError):

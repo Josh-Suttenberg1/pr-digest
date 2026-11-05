@@ -193,16 +193,6 @@ working, stalled, or idle. Run `claude-heartbeat/install.sh` once.
 
 **Refresh now** re-fetches on demand.
 
-**Deploying.** The menu, the watcher, the weekly lessons job and the `prdigest://`
-handler never run this checkout's files: they run an installed copy under
-`~/.local/share/pr-digest/current`, built with `git archive` from a commit, so editing
-or testing here changes nothing live. `bin/deploy` installs HEAD (or a given ref) and
-switches everything to it at once; `bin/deploy --setup` does that and also points
-SwiftBar's plugin folder, the launchd jobs and the link handler at the install (once,
-or when that wiring changes); `bin/deploy --status` says which commit runs. Data stays
-in the checkout: `state/` (watcher state, follow-up jobs, the menu's cache in
-`state/menu/`), `output/`, `review-drafter/state/` and `.env`.
-
 State lives in `state/` (git-ignored); `cache.json` holds the last fetched triage
 so the menu can draw instantly.
 

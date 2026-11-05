@@ -431,13 +431,10 @@ def _uid() -> int:
 
 def install(cfg: dict) -> int:
     LOG.parent.mkdir(parents=True, exist_ok=True)
-    # Through RUN_DIR (an installed release's `current` link), so a deploy switches the
-    # jobs without reinstalling them.
-    python = str(settings.RUN_DIR / ".venv" / "bin" / "python")
     plist = {
         "Label": LABEL,
-        "ProgramArguments": [python, "-m", "watcher", "tick"],
-        "WorkingDirectory": str(settings.RUN_DIR),
+        "ProgramArguments": [sys.executable, "-m", "watcher", "tick"],
+        "WorkingDirectory": str(settings.REPO_DIR),
         "StartInterval": int(cfg["watcher"]["poll_interval"]),
         "RunAtLoad": True,
         "Nice": 5,
@@ -449,9 +446,9 @@ def install(cfg: dict) -> int:
     }
     lessons = {
         "Label": LESSONS_LABEL,
-        "ProgramArguments": [python, str(settings.RUN_DIR / "review" / "harvest_lessons.py"),
+        "ProgramArguments": [sys.executable, str(settings.REPO_DIR / "review" / "harvest_lessons.py"),
                              "--apply"],
-        "WorkingDirectory": str(settings.RUN_DIR),
+        "WorkingDirectory": str(settings.REPO_DIR),
         "StartCalendarInterval": {"Weekday": 1, "Hour": 7, "Minute": 0},
         "Nice": 10,
         "StandardOutPath": str(LESSONS_LOG),

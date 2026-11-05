@@ -20,9 +20,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-import settings
-
-STATUS_DIR = settings.OUTPUT_DIR / "status"
+REPO_DIR = Path(__file__).resolve().parent
+STATUS_DIR = REPO_DIR / "output" / "status"
 
 
 def key_of(url: str) -> str:

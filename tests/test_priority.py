@@ -361,11 +361,8 @@ class SoundTest(unittest.TestCase):
         self.assertEqual(calls[2], ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"])
 
 
-if __name__ == "__main__":
-    unittest.main()
 
-
-# --- @mentions, drafts before popups, deploy -----------------------------------------
+# --- @mentions, drafts before popups -----------------------------------------
 
 import json  # noqa: E402
 import tempfile  # noqa: E402
@@ -463,23 +460,5 @@ class HoldForDraftsTest(unittest.TestCase):
             self.assertTrue(Path(href[len("file://"):]).exists())
 
 
-class DeployTest(unittest.TestCase):
-    def test_launchers_point_at_current_and_data_stays_in_the_checkout(self):
-        import deploy
-        import settings
-        with tempfile.TemporaryDirectory() as tmp:
-            release = Path(tmp) / "releases" / "abc"
-            (release / "swiftbar-plugins").mkdir(parents=True)
-            (release / "swiftbar-plugins" / "x.1h.sh").write_text(
-                '#!/bin/bash\n# <swiftbar.hideAbout>true</swiftbar.hideAbout>\n'
-                'REPO="$(cd "$(dirname "$0")/.." && pwd)"\nexec "$REPO/run" "$@"\n')
-            with mock.patch.multiple(deploy, PLUGINS=Path(tmp) / "plugins",
-                                     CURRENT=Path(tmp) / "current"):
-                deploy.write_plugins(release)
-            text = (Path(tmp) / "plugins" / "x.1h.sh").read_text()
-            self.assertIn(f'REPO="{Path(tmp) / "current"}"', text)
-            self.assertIn("<swiftbar.hideAbout>", text)
-            (release / ".data_dir").write_text("/checkout\n")
-            with mock.patch.object(settings, "REPO_DIR", release), \
-                    mock.patch.dict("os.environ", {"PR_DIGEST_DATA": ""}):
-                self.assertEqual(settings._data_dir(), Path("/checkout"))
+if __name__ == "__main__":
+    unittest.main()
