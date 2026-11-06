@@ -8,29 +8,30 @@ Output follows the SwiftBar/xbar plugin protocol:
 Run by the launcher in swiftbar-plugins/prdigest.1h.sh (hourly + on open).
 
 Every PR is classified once by triage/priority.py, which gives it a section, a color
-(🔴 needs you now, 🟡 waiting a while, 🟢 new, or no dot) and the reason in words.
-Each row reads `<dot> <ticket> · <what happened> · <PR title>`; a grey legend at the
-top explains the dots. Sections, top to bottom:
+(🔴 act now, 🟡 act soon, 🟢 new, ⚪ no action needed, or no dot) and the reason in
+words. Each row reads `<dot> <ticket> · <what happened> · <PR title>`; a grey legend
+at the top explains the dots. Sections, top to bottom:
   1. My PRs — every open PR you author (triage/mine.py), under the sub-headers
      Needs you, Waiting on others and Ready. The submenu says why it has its dot,
      where review stands (approvals with dates, change requests and whose move
      each is, who hasn't reviewed), every comment to answer by kind and linked to its
      thread, and a Claude session to work through them. GitHub drafts with nothing to
      answer collapse into one submenu.
-  2. Follow-ups and mentions — others' PRs you reviewed where someone responded (a
-     re-request, or replies / code changes under your comments), and any PR where
-     someone @mentioned you; the watcher drafts a reply to each. The submenu lists
-     every response with its own drafted reply and actions, then Post the drafted
-     replies and the review draft's actions.
-  3. Reviews you owe — PRs you haven't reviewed (or whose review of yours was
-     dismissed), with the review draft's status and actions (run through
-     review-drafter/menubar.sh, which calls bin/review-pr).
-  4. Non action requiring updates — ⚪ low priority: every other open PR the GitHub
-     searches or the triage turned up, with what happened in words (still working,
-     waiting on the author, parked, approved, drafts). Never counted.
+  2. Other PRs — everyone else's PRs, under two sub-headers and a collapsed submenu:
+     - Needs you: follow-ups (others' PRs you reviewed where someone responded — a
+       re-request, or replies / code changes under your comments — and any PR where
+       someone @mentioned you; the watcher drafts a reply to each, and the submenu
+       lists every response with its own drafted reply and actions) together with
+       reviews you owe (PRs you haven't reviewed, or whose review of yours was
+       dismissed, with the review draft's status and actions, run through
+       review-drafter/menubar.sh, which calls bin/review-pr), most severe first.
+     - Waiting on others: PRs you left comments on whose author hasn't responded.
+     - Nothing needed (N): ⚪, every other open PR the GitHub searches or the triage
+       turned up, with what happened in words (parked, approved, drafts). Never
+       counted.
 
-Each PR appears in exactly one section. Inside a section rows go red, yellow, green,
-then no dot. The menu-bar title counts PRs per color (`🔴2 🟡1 🟢2`), or shows ✓.
+Each PR appears in exactly one place. Inside a sub-header rows go red, yellow, green,
+then no dot. The menu-bar title counts red and yellow PRs (`🔴2 🟡1`), or shows ✓.
 Holding ⌥ turns a colored row into Dismiss: it loses its dot until something newer
 happens on the PR.
 
@@ -300,8 +301,10 @@ def build_sections(data: dict, followup_jobs: list[dict],
                    prio: dict | None = None) -> dict:
     """Sort cached data into the menu's sections through triage/priority.py.
 
-    Returns {"mine", "mine_drafts", "followups", "owed", "other": [entry], "counts":
-    {color: n}, "title": str, "count": int}. An entry is a
+    Returns {"mine", "mine_drafts", "followups", "owed", "other", "others_needs",
+    "others_waiting", "nothing": [entry], "counts": {color: n}, "title": str, "count":
+    int}. `others_needs` is the follow-ups and reviews you owe together (Other PRs →
+    Needs you); `others_waiting` and `nothing` split `other` by its group. An entry is a
     priority.classify result (url, title, section, color, reason, why, waiting_since,
     activity_at, dismissed, row | st, jobs).
 
@@ -312,7 +315,7 @@ def build_sections(data: dict, followup_jobs: list[dict],
     with no dot collapse into `mine_drafts`. `dismissed` maps a PR url to the activity
     time it was dismissed at; the row loses its dot until something newer happens.
 
-    `title` is the menu-bar title (priority.title) and `count` the PRs with a dot."""
+    `title` is the menu-bar title (priority.title) and `count` the PRs it counts."""
     nick = nick or {}
     now = now or datetime.now(timezone.utc)
     prio = prio or {"stale_after_days": 2, "max_engaged_for_stale": 1}
@@ -342,6 +345,14 @@ def build_sections(data: dict, followup_jobs: list[dict],
             placed.add(url)
             other.append(priority.other_entry(pr, data.get("me") or ""))
     other.sort(key=lambda e: (e.get("order", 9), e.get("title") or ""))
+    # Other PRs → Needs you: follow-ups and reviews you owe together, most severe first;
+    # inside a color follow-ups lead, then reviews in ranked order.
+    others_needs = sorted(followups + owed, key=lambda e: (
+        -priority.rank(e.get("color")), e["section"] != priority.FOLLOWUP,
+        ranked.get(e["url"], len(ranked)), e.get("waiting_since") or "~"))
+    others_waiting = sorted((e for e in other if e.get("group") == priority.WAITING),
+                            key=lambda e: e.get("waiting_since") or "~")
+    nothing = [e for e in other if e.get("group") != priority.WAITING]
 
     shown = mine_rows + followups + owed
     counts = priority.counts(shown)
@@ -351,9 +362,12 @@ def build_sections(data: dict, followup_jobs: list[dict],
         "followups": followups,
         "owed": owed,
         "other": other,
+        "others_needs": others_needs,
+        "others_waiting": others_waiting,
+        "nothing": nothing,
         "counts": counts,
         "title": priority.title(shown),
-        "count": sum(counts.values()),
+        "count": sum(counts[c] for c in priority.COUNTED),
     }
 
 
@@ -471,11 +485,12 @@ def row_text(e: dict, limit: int = ROW_MAX) -> str:
     return f"{head} · {truncate(title, max(limit - len(head) - 3, 16))}"
 
 
-def _pr_header(e: dict) -> None:
-    """The submenu's first lines: repo#number with the full title, then why."""
-    emit(f"--{_key(e['url'])} · {truncate(sanitize(_title(e)), 80)}", href=e["url"])
+def _pr_header(e: dict, sub: str = "--") -> None:
+    """The submenu's first lines: repo#number with the full title, then why. `sub` is
+    the submenu's prefix ("----" for a row nested one level down)."""
+    emit(f"{sub}{_key(e['url'])} · {truncate(sanitize(_title(e)), 80)}", href=e["url"])
     if e.get("why"):
-        emit(f"--{sanitize(e['why'])}", color="#888888")
+        emit(f"{sub}{sanitize(e['why'])}", color="#888888")
 
 
 def _draft_actions(key: str, head: str, url: str) -> None:
@@ -821,16 +836,39 @@ def followup_block(e: dict, nick: dict[str, str]) -> None:
     _dismiss(e, jobs)
 
 
-def other_block(e: dict, nick: dict[str, str]) -> None:
-    """A ⚪ row: nothing for you to do; the submenu says why."""
+def other_block(e: dict, nick: dict[str, str], depth: int = 0) -> None:
+    """A row with nothing for you to do; the submenu says why. `depth` 1 nests it in
+    the Nothing needed submenu."""
     url = e["url"]
-    emit(row_text(e), href=url)
-    _pr_header(e)
+    top, sub = "--" * depth, "--" * (depth + 1)
+    emit(top + row_text(e), href=url)
+    _pr_header(e, sub)
     author = (e.get("st") or {}).get("author")
     if author:
-        emit(f"--by {_who(author, nick)}", color="#888888")
-    emit("-----")
-    emit("--Open on GitHub", href=url)
+        emit(f"{sub}by {_who(author, nick)}", color="#888888")
+    emit(sub + "---")
+    emit(f"{sub}Open on GitHub", href=url)
+
+
+def others_rows(sections: dict, nick: dict[str, str]) -> None:
+    """Other PRs: Needs you (follow-ups and reviews you owe), Waiting on others, then
+    everything else collapsed into Nothing needed (N)."""
+    emit(priority.OTHERS_NAME, color="#888888")
+    groups = priority.MINE_GROUPS
+    if sections["others_needs"]:
+        emit(SUBHEAD_INDENT + groups[priority.NEEDS], color="#888888", size="12")
+        for e in sections["others_needs"]:
+            (followup_block if e["section"] == priority.FOLLOWUP else owed_block)(e, nick)
+    if sections["others_waiting"]:
+        emit(SUBHEAD_INDENT + groups[priority.WAITING], color="#888888", size="12")
+        for e in sections["others_waiting"]:
+            other_block(e, nick)
+    if not sections["others_needs"] and not sections["others_waiting"]:
+        emit("Nothing waiting on you", color="#6b6b70")
+    if sections["nothing"]:
+        emit(f"{priority.NOTHING_NAME} ({len(sections['nothing'])})", color="#888888")
+        for e in sections["nothing"]:
+            other_block(e, nick, depth=1)
 
 
 def render_menu(sections: dict, *, spinner: bool, error: str | None,
@@ -867,24 +905,8 @@ def render_menu(sections: dict, *, spinner: bool, error: str | None,
         if not sections["mine"] and not sections["mine_drafts"]:
             emit("No open PRs", color="#6b6b70")
 
-        if sections["followups"]:
-            print("---")
-            emit(priority.SECTION_NAMES[priority.FOLLOWUP], color="#888888")
-            for e in sections["followups"]:
-                followup_block(e, nick)
-
         print("---")
-        emit("Reviews you owe", color="#888888")
-        for e in sections["owed"]:
-            owed_block(e, nick)
-        if not sections["owed"]:
-            emit("No reviews owed", color="#6b6b70")
-
-        if sections["other"]:
-            print("---")
-            emit(priority.SECTION_NAMES[priority.OTHER], color="#888888")
-            for e in sections["other"]:
-                other_block(e, nick)
+        others_rows(sections, nick)
 
     # --- footer actions ---
     print("---")

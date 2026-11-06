@@ -23,6 +23,11 @@ Every PR lands in exactly one section, with at most one color:
       no dot   `required` approvals on the head commit, nothing to answer, no change
                request standing.
 
+  Other PRs, everyone else's open PRs. Each entry keeps the kind it was classified as
+  (`section`: FOLLOWUP, OWED or OTHER); the menu shows them under Needs you (follow-ups
+  and reviews you owe, `group` NEEDS), Waiting on others (`group` WAITING) and a
+  collapsed Nothing needed (`group` NOTHING).
+
   Follow-ups and mentions (`FOLLOWUP`), others' PRs you reviewed or commented on where
   someone responded since your last comment, and any PR where someone @mentioned you:
     red      someone @mentioned you; the author re-requested your review (whatever
@@ -31,8 +36,8 @@ Every PR lands in exactly one section, with at most one color:
              outdated / moved triggers).
     yellow   the only responses are on non-blocking threads.
   A PR you engaged with that has none of these (say the author pushed commits that
-  touch none of your threads, or commented without mentioning you) goes to Non action
-  requiring updates: the author is still working.
+  touch none of your threads, or commented without mentioning you) is Waiting on
+  others: the author is still working.
 
   Reviews you owe (`OWED`), others' PRs you haven't reviewed, or whose review of yours
   was dismissed:
@@ -40,11 +45,12 @@ Every PR lands in exactly one section, with at most one color:
              weekends included, from reviews._waiting_since), fewer than `required`
              approvals, and at most `max_engaged` people other than the author and bots
              have approved or commented.
-    green    everything else.
+    green    everything else. Shown, but not counted in the menu-bar title.
 
-  Non action requiring updates (`OTHER`), always ⚪ low: the rest, each with the
-  reason in words (still working, waiting on the author, parked, approved, drafts).
-  Never counted and never notified.
+  Everything else (`OTHER`): Waiting on others, with no dot, when you left comments or
+  a change request and the author hasn't responded to them; otherwise Nothing needed,
+  ⚪ low, with the reason in words (parked, approved, drafts). Never counted and never
+  notified.
 
 A comment of yours is blocking when comment_kind tags it blocking, or when it was part
 of a CHANGES_REQUESTED review and isn't tagged nit or suggestion (`is_blocking`).
@@ -61,8 +67,11 @@ from datetime import datetime, timezone
 from triage import comment_kind
 
 RED, YELLOW, GREEN, LOW = "red", "yellow", "green", "low"
-# The colors the menu-bar title counts; LOW never counts and never notifies.
+# The colors a row can carry besides LOW, which never counts and never notifies.
 COLORS = (RED, YELLOW, GREEN)
+# The colors the menu-bar title counts: things to act on. A new review request (green)
+# shows in the menu but leaves the title alone.
+COUNTED = (RED, YELLOW)
 DOTS = {RED: "🔴", YELLOW: "🟡", GREEN: "🟢", LOW: "⚪"}
 LEGEND = "🔴 act now · 🟡 act soon · 🟢 new · ⚪ no action needed"
 _RANK = {None: 0, LOW: 0, GREEN: 1, YELLOW: 2, RED: 3}
@@ -181,10 +190,16 @@ def followup_color(blocking: list[bool], rerequested: bool,
 
 # --- Your PRs ---------------------------------------------------------------------
 
-# My PRs' sub-headers, in menu order.
-NEEDS, WAITING, READY = "needs_you", "waiting", "ready"
+# Sub-headers (an entry's `group`), in menu order. My PRs use the first three; Other
+# PRs use Needs you and Waiting on others, and list NOTHING in a collapsed submenu.
+NEEDS, WAITING, READY, NOTHING = "needs_you", "waiting", "ready", "nothing"
 MINE_GROUPS = {NEEDS: "Needs you", WAITING: "Waiting on others", READY: "Ready"}
 MINE_GROUP_ORDER = {NEEDS: 0, WAITING: 1, READY: 2}
+OTHERS_NAME = "Other PRs"
+NOTHING_NAME = "Nothing needed"
+# other_reason orders that mean the author hasn't responded to you yet: they pushed
+# commits that miss your comments or commented elsewhere (0), or nothing since (1).
+WAITING_ORDERS = (0, 1)
 # Comments on your PR that only make it yellow; any other kind makes it red.
 YELLOW_KINDS = frozenset({"nit", "suggestion"})
 
@@ -513,10 +528,23 @@ def legacy(pr: dict, me: str) -> tuple[str, str, int]:
 
 
 def _low(base: dict, words: str, detail: str, order: int) -> dict:
-    return {**base, "section": OTHER, "color": LOW, "reason": words,
+    return {**base, "section": OTHER, "group": NOTHING, "color": LOW, "reason": words,
             "why": f"Why: {detail}" if detail and detail != words else "",
             "order": order, "waiting_since": "", "activity_at": "", "dismissed": False,
             "jobs": []}
+
+
+def _not_on_you(base: dict, st: dict, now: datetime) -> dict:
+    """Someone else's PR with nothing for you. One you left comments or a change
+    request on, whose author hasn't responded to them (other_reason orders 0 and 1),
+    is Waiting on others: no dot, aged from your latest review. The rest is Nothing
+    needed (⚪)."""
+    e = _low(base, *other_reason(st))
+    if e["order"] not in WAITING_ORDERS:
+        return e
+    since = (st.get("my_review") or ["", ""])[0] or ""
+    return {**e, "group": WAITING, "color": None, "waiting_since": since,
+            "reason": _with_age(e["reason"], since, now)}
 
 
 # --- the whole menu ------------------------------------------------------------------
@@ -561,14 +589,14 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
             mine_state = (st.get("mine") or [None])[0]
             fresh = not (st.get("mine") or st.get("commented")) or mine_state == "DISMISSED"
             if f:
-                out.append({**base, **f})
+                out.append({**base, **f, "group": NEEDS})
             elif (fresh and st.get("bucket") == "needs_you"
                   and st.get("tier") != PARKED_TIER):
-                out.append({**base, "jobs": [], **owed(
+                out.append({**base, "jobs": [], "group": NEEDS, **owed(
                     st, nick, now, required=required, stale_after_days=stale_after_days,
                     max_engaged=max_engaged, dismissed_at=dismissed.get(url))})
             else:
-                out.append(_low(base, *other_reason(st)))
+                out.append(_not_on_you(base, st, now))
 
     # Responses on a PR the review triage didn't return (it closed between fetches, or
     # the search missed it) still show as follow-ups.
@@ -579,7 +607,7 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
         if f:
             placed.add(url)
             out.append({**f, "url": url, "title": (js[0].get("pr") or {}).get("title", ""),
-                        "row": None, "st": None})
+                        "row": None, "st": None, "group": NEEDS})
     return out
 
 
@@ -589,9 +617,10 @@ def counts(entries: list[dict]) -> dict[str, int]:
 
 
 def title(entries: list[dict]) -> str:
-    """The menu-bar title: '🔴2 🟡1 🟢2', omitting colors with none; '✓' when empty."""
+    """The menu-bar title: '🔴2 🟡1', counting only COUNTED colors and omitting those
+    with none; '✓' when nothing is red or yellow."""
     n = counts(entries)
-    return " ".join(f"{DOTS[c]}{n[c]}" for c in COLORS if n[c]) or "✓"
+    return " ".join(f"{DOTS[c]}{n[c]}" for c in COUNTED if n[c]) or "✓"
 
 
 def other_entry(pr: dict, me: str) -> dict:

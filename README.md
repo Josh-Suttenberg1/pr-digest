@@ -135,11 +135,11 @@ GITHUB_TOKEN=ghp_xxx python3 pr_digest.py
 
 For a glanceable view instead of a file, there's a [SwiftBar](https://swiftbar.app)
 plugin. Every PR gets **one row** with a priority dot, and the menu-bar title counts
-PRs per color, e.g. `🔴2 🟡1 🟢2` (`✓` when there's nothing to do). A grey legend at
+PRs per color, e.g. `🔴2 🟡1` (`✓` when there's nothing to do). A grey legend at
 the top explains the dots: 🔴 act now · 🟡 act soon · 🟢 new · ⚪ no action
 needed. Each row
 reads `<dot> <ticket> · <what happened> · <PR title>`, so the ticket always says which
-PR it is and truncation cuts the title, not the action. The dropdown has four
+PR it is and truncation cuts the title, not the action. The dropdown has two
 sections, and each PR appears in exactly one:
 
 1. **My PRs** — every open PR you author, under three sub-headers:
@@ -159,20 +159,26 @@ sections, and each PR appears in exactly one:
    reviewed, every comment to answer by kind (Blocking / Suggestion / Question / Nit,
    linked to its thread), and **Go through these with Claude**. GitHub drafts with
    nothing to answer collapse into one submenu.
-2. **Follow-ups and mentions** — others' PRs you reviewed where someone responded,
-   and any PR where someone @mentioned you. 🔴 for a mention, a re-request, or an
-   answer to (or code change under) one of your blocking comments; 🟡 when only
-   non-blocking ones got responses. The watcher drafts a reply to each response and
-   each mention. The submenu lists them with their drafted replies (Post / Edit first
-   / Read Claude's follow-up / Dismiss), then **Post the drafted replies** and the
-   review draft's actions.
-3. **Reviews you owe** — PRs you haven't reviewed yet (or whose review of yours was
-   dismissed). 🟡 when stalled: waiting more than `[priority] stale_after_days`, under
-   the required approvals, and at most `max_engaged_for_stale` others engaged. 🟢
-   otherwise. Each row has its review draft's status and actions.
-4. **Non action requiring updates** — ⚪ low priority: every other open PR you're
-   involved in, with what happened in words (the author is still working, waiting on
-   the author, parked, already approved, GitHub drafts). Never counted, never notified.
+2. **Other PRs** — everyone else's open PRs you're involved in:
+   - **Needs you:** follow-ups, mentions and reviews you owe, most severe first.
+     - A follow-up is one of your reviews someone responded to, or an @mention. 🔴 for
+       a mention, a re-request, or an answer to (or code change under) one of your
+       blocking comments; 🟡 when only non-blocking ones got responses. The watcher
+       drafts a reply to each response and each mention, and the submenu lists them
+       with their drafted replies (Post / Edit first / Read Claude's follow-up /
+       Dismiss), then **Post the drafted replies** and the review draft's actions.
+     - A review you owe is a PR you haven't reviewed yet (or whose review of yours was
+       dismissed). 🟡 when stalled: waiting more than `[priority] stale_after_days`,
+       under the required approvals, and at most `max_engaged_for_stale` others
+       engaged. 🟢 otherwise. Each row has its review draft's status and actions.
+   - **Waiting on others:** PRs you left comments or a change request on whose author
+     hasn't responded to them yet, with how long since your review. No dot.
+   - **Nothing needed (N):** a collapsed submenu with the rest (parked, already
+     approved, GitHub drafts), each with the reason in words. ⚪, never counted, never
+     notified.
+
+The menu-bar title counts 🔴 and 🟡 only; 🟢 new review requests show in the menu but
+don't count.
 
 Holding ⌥ turns a colored row into **Dismiss**: it loses its dot until something newer
 happens on the PR. The rules live in `triage/priority.py`, which the menu, the

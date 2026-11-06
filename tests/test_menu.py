@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import unittest.mock
 
 import swiftbar_plugin as menu
 from triage import mine
@@ -40,7 +41,8 @@ class BuildSectionsTest(unittest.TestCase):
         s = menu.build_sections(self.data(reviews={"needs_you": [st(1, bucket="needs_you"),
                                                                  parked]}), [])
         self.assertEqual([e["url"] for e in s["owed"]], [st(1)["pr_url"]])
-        self.assertEqual(s["count"], 1)
+        self.assertEqual(s["count"], 0)      # a new review request (green) isn't counted
+        self.assertEqual(s["title"], "✓")
         self.assertEqual([(e["color"], e["reason"]) for e in s["other"]],
                          [("low", "Parked: CI failing (build)")])
 
@@ -100,11 +102,56 @@ class BuildSectionsTest(unittest.TestCase):
                          ["https://github.com/acme/web/pull/9"])
         self.assertIn("check this", by_url["https://github.com/acme/api/pull/7"])
         self.assertEqual(len(s["other"]), 5)   # no PR listed twice
-        self.assertTrue(all(e["color"] == "low" for e in s["other"]))
+        # Waiting on the author has no dot; the rest is ⚪ under Nothing needed.
+        self.assertEqual([e["url"] for e in s["others_waiting"]],
+                         ["https://github.com/acme/api/pull/2"])
+        self.assertIsNone(s["others_waiting"][0]["color"])
+        self.assertTrue(all(e["color"] == "low" for e in s["nothing"]))
+        self.assertEqual(len(s["nothing"]), 4)
         self.assertEqual(s["count"], 0)
         self.assertEqual(s["title"], "✓")    # ⚪ rows never count
         self.assertEqual([e["reason"] for e in s["other"]][:2],
                          ["Waiting on the author", "0 approvals, no change requests"])
+
+    def test_other_prs_needs_you_mixes_follow_ups_and_reviews_by_severity(self):
+        def job(pr_id, blocking):
+            return {"id": f"j{pr_id}", "status": "ready", "created_at": "2026-01-01T00:00:00Z",
+                    "trigger": "reply", "actor": "dev", "my_comment": "x", "blocking": blocking,
+                    "pr": {"id": pr_id, "url": f"https://github.com/acme/api/pull/{pr_id}",
+                           "title": f"ABC-{pr_id}: thing", "author": "dev"}}
+        stale = st(3, bucket="needs_you", waiting_since="2020-01-01T00:00:00Z", approvals=[],
+                   engaged=[])
+        fresh = st(4, bucket="needs_you", waiting_since="2999-01-01T00:00:00Z")
+        s = menu.build_sections(self.data(reviews={"needs_you": [fresh, stale]}),
+                                [job(1, True), job(2, False)])
+        self.assertEqual([(e["url"].rsplit("/", 1)[1], e["color"]) for e in s["others_needs"]],
+                         [("1", "red"), ("2", "yellow"), ("3", "yellow"), ("4", "green")])
+        self.assertEqual(s["title"], "🔴1 🟡2")
+
+    def test_other_prs_render_needs_you_waiting_then_a_collapsed_nothing_needed(self):
+        import contextlib
+        import io
+        data = self.data(
+            reviews={"needs_you": [st(1, bucket="needs_you")],
+                     "author": [st(2, reason="you commented; no new commits", bucket="author",
+                                   my_review=["2026-01-01T00:00:00Z", "abc"])],
+                     "well_approved": [st(3, reason="2 approvals", bucket="well_approved",
+                                          approvals=["a", "b"])]})
+        s = menu.build_sections(data, [])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), \
+                unittest.mock.patch.object(menu, "_reviews_on", return_value=False):
+            menu.others_rows(s, {})
+        top = [x.split(" | ")[0].strip("\u00a0") for x in out.getvalue().splitlines()
+               if not x.startswith("--")]
+        self.assertEqual(top[0], "Other PRs")
+        self.assertEqual([x for x in top if x in ("Needs you", "Waiting on others")],
+                         ["Needs you", "Waiting on others"])
+        self.assertEqual(top[-1], "Nothing needed (1)")
+        nested = [x for x in out.getvalue().splitlines() if x.startswith("--⚪ ABC-3")]
+        self.assertEqual(len(nested), 1)        # the ⚪ row sits inside the submenu
+        self.assertTrue(any(x.startswith("----") and "Open on GitHub" in x
+                            for x in out.getvalue().splitlines()))
 
     def test_my_waiting_pr_is_not_repeated_in_everything_else(self):
         data = self.data(mine=[mine_row(9, True)], legacy=[legacy(9, author=ME, repo="web")])

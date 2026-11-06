@@ -79,7 +79,7 @@ class FollowupRulesTest(unittest.TestCase):
         s = st(1, commented=True, reason="you commented @abc12345, real commits landed since",
                tier=0)
         e = classify({"needs_you": [s]})[url(1)]
-        self.assertEqual((e["section"], e["color"]), (P.OTHER, P.LOW))
+        self.assertEqual((e["section"], e["group"], e["color"]), (P.OTHER, P.WAITING, None))
         self.assertEqual(e["reason"], "The author pushed commits that touch none of your comments")
 
     def test_answered_or_dismissed_jobs_no_longer_count(self):
@@ -267,8 +267,8 @@ class OrderAndTitleTest(unittest.TestCase):
     def test_title_counts_each_color_and_shows_a_check_when_empty(self):
         es = [{"color": P.RED}, {"color": P.RED}, {"color": P.YELLOW}, {"color": P.GREEN},
               {"color": None}]
-        self.assertEqual(P.title(es), "🔴2 🟡1 🟢1")
-        self.assertEqual(P.title([{"color": P.GREEN}]), "🟢1")
+        self.assertEqual(P.title(es), "🔴2 🟡1")
+        self.assertEqual(P.title([{"color": P.GREEN}]), "✓")      # new requests don't count
         self.assertEqual(P.title([{"color": None}]), "✓")
 
     def test_red_then_yellow_then_green_then_none_longest_wait_first(self):
