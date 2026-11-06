@@ -37,6 +37,7 @@ Read-only; uses `gh`, which must be authenticated.
 
 from __future__ import annotations
 
+import functools
 import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -49,6 +50,7 @@ query($owner:String!,$name:String!,$num:Int!){
     pullRequest(number:$num){
       isDraft
       reviewDecision
+      baseRefName
       headRefOid
       commits(last:1){nodes{commit{oid committedDate author{user{login}}}}}
       reviewThreads(first:100){nodes{
@@ -96,6 +98,19 @@ def detail(owner: str, name: str, num: int) -> dict:
         "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"num={num}",
     ])
     return json.loads(out)["data"]["repository"]["pullRequest"]
+
+
+@functools.lru_cache(maxsize=64)
+def last_push_required(owner: str, name: str, base: str) -> bool:
+    """Whether the repo's rules on `base` require an approval of the latest push before
+    a merge (a ruleset's `require_last_push_approval`). False when it can't be read."""
+    try:
+        rules = json.loads(_gh(["gh", "api", f"repos/{owner}/{name}/rules/branches/{base}"]))
+    except (GhError, ValueError, subprocess.TimeoutExpired):
+        return False
+    return any(r.get("type") == "pull_request"
+               and (r.get("parameters") or {}).get("require_last_push_approval")
+               for r in rules if isinstance(r, dict))
 
 
 def _login(node: dict) -> str:
@@ -230,10 +245,12 @@ def _on_head(commit: str, head: str) -> bool:
     return not commit or not head or commit == head
 
 
-def build_row(p: dict, d: dict, me: str, bots: set[str] | frozenset = frozenset()) -> dict:
+def build_row(p: dict, d: dict, me: str, bots: set[str] | frozenset = frozenset(),
+              last_push: bool = False) -> dict:
     """One PR's row from its search hit `p` (repository.name, number, title, url,
     updatedAt) and its `detail()`, with `waiting` set when anything in `analyze` is
-    non-empty."""
+    non-empty. `last_push` is whether the repo requires an approval of the latest push
+    (`last_push_required`)."""
     a = analyze(d, me, bots)
     return {
         "repo": p["repository"]["name"],
@@ -242,6 +259,7 @@ def build_row(p: dict, d: dict, me: str, bots: set[str] | frozenset = frozenset(
         "url": p["url"],
         "isDraft": d["isDraft"],
         "updated_at": p.get("updatedAt") or "",
+        "last_push_required": last_push,
         "waiting": bool(a["threads_waiting"] or a["blockers"]
                         or a["unanswered_comments"]),
         **a,
@@ -252,7 +270,9 @@ def row_for(owner: str, name: str, num: int, title: str, url: str, me: str,
             bots: set[str] | frozenset = frozenset()) -> dict:
     """The row for one PR, fetched on its own (the watcher's notifications use it)."""
     hit = {"repository": {"name": name}, "number": num, "title": title, "url": url}
-    return build_row(hit, detail(owner, name, num), me, bots)
+    d = detail(owner, name, num)
+    return build_row(hit, d, me, bots,
+                     last_push_required(owner, name, d.get("baseRefName") or "main"))
 
 
 def mine_triage(me: str, bots: set[str] | frozenset = frozenset()) -> list[dict]:
@@ -261,7 +281,9 @@ def mine_triage(me: str, bots: set[str] | frozenset = frozenset()) -> list[dict]
 
     def row(p: dict) -> dict:
         owner, name = p["repository"]["nameWithOwner"].split("/")
-        return build_row(p, detail(owner, name, p["number"]), me, bots)
+        d = detail(owner, name, p["number"])
+        return build_row(p, d, me, bots,
+                         last_push_required(owner, name, d.get("baseRefName") or "main"))
 
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         return list(pool.map(row, prs))

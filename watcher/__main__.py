@@ -110,7 +110,9 @@ def pr_priority(pr: dict, cfg: dict, jobs: list[dict]) -> tuple[str | None, str]
         return p["color"], p["reason"]
     f = priority.followup([j for j in jobs if (j.get("pr") or {}).get("id") == pr["id"]],
                           nick, author=pr["author"],
-                          rerequested_at=ev.pending_rerequest(pr, cfg["me"]))
+                          rerequested_at=ev.pending_rerequest(pr, cfg["me"]),
+                          approvals=len(pr.get("approved_by") or []),
+                          required=cfg["watcher"]["required_approvals"])
     return (f["color"], f["reason"]) if f else (None, "")
 
 
@@ -169,7 +171,7 @@ _EVENT_KEYS = ("type", "actor", "state", "first_line", "count", "trigger", "path
 
 def hold_for_drafts(notes: list[tuple[dict, str, str, list[dict]]], pending: dict[str, dict],
                     jobs: list[dict], now: str, nick: dict[str, str], me: str,
-                    max_minutes: int = PENDING_MAX_MINUTES) -> list[tuple]:
+                    max_minutes: int = PENDING_MAX_MINUTES, required: int = 2) -> list[tuple]:
     """Which notifications go out now, as [(pr, color, reason, events, pr_jobs)].
 
     A follow-up or mention whose drafts are still being written waits in `pending`
@@ -201,8 +203,11 @@ def hold_for_drafts(notes: list[tuple[dict, str, str, list[dict]]], pending: dic
         if any(j.get("status") in UNFINISHED for j in js) and waited < timedelta(minutes=max_minutes):
             continue
         pending.pop(pid)
+        known = "approved_by" in p["pr"]
         f = priority.followup(js, nick, author=p["pr"]["author"],
-                              rerequested_at=p.get("rerequested_at") or "")
+                              rerequested_at=p.get("rerequested_at") or "",
+                              approvals=len(p["pr"]["approved_by"]) if known else None,
+                              required=required)
         if f and f["color"]:
             out.append((p["pr"], f["color"], f["reason"], p["events"], f["jobs"]))
     return out
@@ -380,7 +385,8 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
                           lambda pr, js: pr_priority(pr, cfg, js), seed=seeding or seed_colors)
     pending = {} if replay else st.get("pending", {})
     ready = hold_for_drafts(notes, pending, jobs + event_jobs(events, jobs, now_iso), now_iso,
-                            names.book(fetch=True), me)
+                            names.book(fetch=True), me,
+                            required=cfg["watcher"]["required_approvals"])
     deliver(ready, cfg, dry_run)
     if dry_run:
         for pid, p in pending.items():

@@ -12,16 +12,17 @@ Every PR lands in exactly one section, with at most one color:
       red      a change request whose reviewer you haven't re-requested since, or a
                comment to answer (an open thread whose last human comment isn't yours,
                or an unanswered top-level comment) that isn't a nit or a suggestion.
-      yellow   only nits and suggestions are waiting; or the PR needs re-approval:
-               it has `required` approvals, but fewer than that on the head commit.
+      yellow   only nits and suggestions are waiting.
     Waiting on others
       no dot   waiting on a re-review (a reviewer you re-requested after their change
                request or approval) or on a review, naming who and since when.
       yellow   the same, once the wait passes `stale_after_days`: a cue to nudge.
       no dot   a GitHub draft with nothing to answer, or no reviewer requested.
     Ready
-      no dot   `required` approvals on the head commit, nothing to answer, no change
-               request standing.
+      no dot   `required` approvals, nothing to answer, no change request standing. In
+               a repo that requires an approval of the latest push, one with none on
+               its head commit says to get one before merging.
+  Every row ends with its approval tally (`tally`) and, while it waits, its age.
 
   Other PRs, everyone else's open PRs. Each entry keeps the kind it was classified as
   (`section`: FOLLOWUP, OWED or OTHER); the menu shows them under Needs you (follow-ups
@@ -223,6 +224,11 @@ def age(since, now: datetime) -> str:
     return "today" if days <= 0 else f"{days}d"
 
 
+def tally(n: int, required: int) -> str:
+    """'1 of 2 approvals'; past the requirement, just the count ('3 approvals')."""
+    return f"{n} of {required} approvals" if n <= required else f"{n} approvals"
+
+
 def _with_age(text: str, since, now: datetime) -> str:
     a = age(since, now)
     return f"{text} · {a}" if a else text
@@ -239,7 +245,7 @@ def mine(row: dict, nick: dict[str, str], required: int = 2,
     activity_at, dismissed}. `now` defaults to the current time."""
     now = now or datetime.now(timezone.utc)
     if row.get("waiting"):
-        p = _mine_needs_you(row, nick)
+        p = _mine_needs_you(row, nick, required)
     else:
         p = _mine_not_on_you(row, nick, required, now, stale_after_days)
     # A row that waits on someone ends with how long; Ready, drafts and "no reviewer
@@ -255,7 +261,7 @@ def mine(row: dict, nick: dict[str, str], required: int = 2,
     return {**p, "section": MINE, "reason": reason, "dismissed": False}
 
 
-def _mine_needs_you(row: dict, nick: dict[str, str]) -> dict:
+def _mine_needs_you(row: dict, nick: dict[str, str], required: int) -> dict:
     """Something on the PR is waiting on you: red for a change request or any comment
     that isn't a nit or a suggestion, yellow when only nits and suggestions wait."""
     asks = _asks(row)
@@ -282,8 +288,10 @@ def _mine_needs_you(row: dict, nick: dict[str, str]) -> dict:
                    f"{'is' if n == 1 else 'are'} unanswered")
     if not red:
         why.append("only nits and suggestions are waiting")
+    parts = parts or ["Something is waiting on you"]
+    parts.append(tally(len(row.get("approvals") or []), required))
     return {"group": NEEDS, "color": RED if red else YELLOW,
-            "reason": " · ".join(parts) or "Something is waiting on you",
+            "reason": " · ".join(parts),
             "why": f"Why it's {'red' if red else 'yellow'}: " + "; ".join(why),
             "waiting_since": min(stamps, default=""),
             "activity_at": max(stamps, default="")}
@@ -292,15 +300,18 @@ def _mine_needs_you(row: dict, nick: dict[str, str]) -> dict:
 def _mine_not_on_you(row: dict, nick: dict[str, str], required: int, now: datetime,
                      stale_after_days: float) -> dict:
     """Nothing to answer: waiting on a re-review or a review (yellow once the wait
-    passes `stale_after_days`), Ready on the latest push, or needing re-approval
-    because the approvals predate it (yellow)."""
+    passes `stale_after_days`), or Ready. Ready is `required` approvals and no change
+    request standing; in a repo whose rules require an approval of the latest push
+    (`last_push_required`), one with no approval on its head commit says to get one
+    before merging, still with no dot."""
     approvals = row.get("approvals") or []
     requested = row.get("requested") or []
     since_of = row.get("requested_since") or {}
     answered = row.get("answered_change_requests") or []
     on_head = [a for a in approvals if a.get("on_head", True)]
-    before_head = [a for a in approvals if not a.get("on_head", True)]
-    reapprovers = [a for a in approvals if a["author"] in requested]
+    reapprove = bool(row.get("last_push_required")) and not on_head
+    count = tally(len(approvals), required)
+    reapprove_why = "GitHub needs an approval of the latest push here, and none is on it yet"
 
     def waiting(reason: str, who_: list[str], since: str, why: str) -> dict:
         stale = (bool(since) and not row.get("isDraft")
@@ -313,6 +324,7 @@ def _mine_not_on_you(row: dict, nick: dict[str, str], required: int, now: dateti
         return {"group": WAITING, "color": YELLOW if stale else None, "reason": reason,
                 "why": why, "waiting_since": since, "activity_at": since}
 
+    reapprovers = [a for a in approvals if a["author"] in requested]
     if answered or reapprovers:
         people = _unique([b["author"] for b in answered] + [a["author"] for a in reapprovers])
         stamps = [b.get("rerequested_at") or "" for b in answered]
@@ -321,27 +333,19 @@ def _mine_not_on_you(row: dict, nick: dict[str, str], required: int, now: dateti
                f"re-requested them {ago(b.get('rerequested_at'), now)}" for b in answered]
         why += [f"you re-requested {who(a['author'], nick)} after their approval"
                 for a in reapprovers]
-        if before_head:
-            why.append(f"{len(on_head)} of {required} approvals are on the latest push")
-        return waiting(f"Waiting on re-review: {names(people, nick)}", people,
+        if reapprove:
+            why.append(reapprove_why)
+        return waiting(f"Waiting on re-review: {names(people, nick)} · {count}", people,
                        min((x for x in stamps if x), default=""), "; ".join(why))
 
-    if len(on_head) >= required:
-        return {"group": READY, "color": None,
-                "reason": f"Ready: approved {len(on_head)} of {required} on the latest push",
-                "why": "", "waiting_since": "", "activity_at": "", "aged": False}
-
     if len(approvals) >= required:
-        stale_names = names([a["author"] for a in before_head], nick)
-        head_at = row.get("head_at") or ""
-        older = (f"{_possessive(before_head[0]['author'], nick)} approval predates it"
-                 if len(before_head) == 1
-                 else f"the approvals from {stale_names} predate it")
-        return {"group": NEEDS, "color": YELLOW,
-                "reason": f"Needs re-approval from {stale_names}",
-                "why": (f"Why it's yellow: {len(on_head)} of {required} approvals are on "
-                        f"the latest push; {older}"),
-                "waiting_since": head_at, "activity_at": head_at}
+        if reapprove:
+            return {"group": READY, "color": None,
+                    "reason": f"Ready · re-approve the latest push before merge · {count}",
+                    "why": f"Why: {reapprove_why}", "waiting_since": "", "activity_at": "",
+                    "aged": False}
+        return {"group": READY, "color": None, "reason": f"Ready: {count}",
+                "why": "", "waiting_since": "", "activity_at": "", "aged": False}
 
     if row.get("isDraft"):
         return {"group": WAITING, "color": None, "reason": "GitHub draft, nothing to answer",
@@ -349,23 +353,24 @@ def _mine_not_on_you(row: dict, nick: dict[str, str], required: int, now: dateti
 
     decided = {a["author"] for a in approvals}
     pending = [r for r in requested if r not in decided]
-    tally = f"{len(approvals)} of {required} approvals"
     if not pending:
         return {"group": WAITING, "color": None,
-                "reason": f"No reviewer requested · {tally}", "why": "",
+                "reason": f"No reviewer requested · {count}", "why": "",
                 "waiting_since": "", "activity_at": "", "aged": False}
     since = min((since_of.get(r) or "" for r in pending if since_of.get(r)), default="")
-    return waiting(f"Waiting on review: {names(pending, nick)} · {tally}", pending, since, "")
+    return waiting(f"Waiting on review: {names(pending, nick)} · {count}", pending, since, "")
 
 
 # --- Follow-ups on your reviews -----------------------------------------------------
 
 
 def followup(jobs: list[dict], nick: dict[str, str], *, author: str = "",
-             rerequested_at: str = "", dismissed_at: str | None = None) -> dict | None:
+             rerequested_at: str = "", dismissed_at: str | None = None,
+             approvals: int | None = None, required: int = 2) -> dict | None:
     """Others' PR with something for you: the responses since your last comment and
     the @mentions of you (the watcher's follow-up jobs for the PR, any status) and a
-    pending re-request. None when there's none of these, so it isn't a follow-up."""
+    pending re-request. None when there's none of these, so it isn't a follow-up.
+    `approvals`, when known, ends the reason with the PR's approval tally."""
     every = [j for j in jobs if j.get("status") in ACTIVE_JOBS]
     if not every and not rerequested_at:
         return None
@@ -419,6 +424,8 @@ def followup(jobs: list[dict], nick: dict[str, str], *, author: str = "",
         n = len(mentions)
         parts.append(f"{who_} mentioned you" + (f" {n} times" if n > 1 else ""))
         why.insert(0, f"{who_} mentioned you")
+    if approvals is not None:
+        parts.append(tally(approvals, required))
     reason = " · ".join(parts)
     dismissed = bool(dismissed_at and activity and activity <= dismissed_at)
     label = {RED: "red", YELLOW: "yellow"}.get(color, "")
@@ -447,10 +454,10 @@ def owed(st: dict, nick: dict[str, str], now: datetime, *, required: int = 2,
     dismissed_review = (st.get("mine") or [None])[0] == "DISMISSED"
 
     if stale:
-        reason = f"Waiting {_plural(int(waited), 'day')}, {approvals}"
+        reason = f"Waiting {_plural(int(waited), 'day')} · {tally(n, required)}"
     else:
-        reason = "Requested " + (f"{_plural(int(waited), 'day')} ago" if waited >= 2
-                                  else ago(since, now))
+        reason = ("Requested " + (f"{_plural(int(waited), 'day')} ago" if waited >= 2
+                                   else ago(since, now)) + f" · {tally(n, required)}")
         if len(engaged) > max_engaged:
             reason += f" · {names(engaged, nick)} are on it"
     if dismissed_review:
@@ -534,7 +541,7 @@ def _low(base: dict, words: str, detail: str, order: int) -> dict:
             "jobs": []}
 
 
-def _not_on_you(base: dict, st: dict, now: datetime) -> dict:
+def _not_on_you(base: dict, st: dict, now: datetime, required: int = 2) -> dict:
     """Someone else's PR with nothing for you. One you left comments or a change
     request on, whose author hasn't responded to them (other_reason orders 0 and 1),
     is Waiting on others: no dot, aged from your latest review. The rest is Nothing
@@ -543,8 +550,9 @@ def _not_on_you(base: dict, st: dict, now: datetime) -> dict:
     if e["order"] not in WAITING_ORDERS:
         return e
     since = (st.get("my_review") or ["", ""])[0] or ""
+    reason = f"{e['reason']} · {tally(len(st.get('approvals') or []), required)}"
     return {**e, "group": WAITING, "color": None, "waiting_since": since,
-            "reason": _with_age(e["reason"], since, now)}
+            "reason": _with_age(reason, since, now)}
 
 
 # --- the whole menu ------------------------------------------------------------------
@@ -585,7 +593,8 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
                 continue
             f = followup(by_url.get(url, []), nick, author=st.get("author", ""),
                          rerequested_at=st.get("rerequested_at") or "",
-                         dismissed_at=dismissed.get(url))
+                         dismissed_at=dismissed.get(url),
+                         approvals=len(st.get("approvals") or []), required=required)
             mine_state = (st.get("mine") or [None])[0]
             fresh = not (st.get("mine") or st.get("commented")) or mine_state == "DISMISSED"
             if f:
@@ -596,7 +605,7 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
                     st, nick, now, required=required, stale_after_days=stale_after_days,
                     max_engaged=max_engaged, dismissed_at=dismissed.get(url))})
             else:
-                out.append(_not_on_you(base, st, now))
+                out.append(_not_on_you(base, st, now, required))
 
     # Responses on a PR the review triage didn't return (it closed between fetches, or
     # the search missed it) still show as follow-ups.

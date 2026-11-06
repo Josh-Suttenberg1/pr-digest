@@ -93,7 +93,8 @@ class BuildSectionsTest(unittest.TestCase):
         by_url = {e["url"]: e["reason"] for e in s["other"]}
         self.assertEqual(by_url["https://github.com/acme/api/pull/1"],
                          "0 approvals, no change requests")
-        self.assertEqual(by_url["https://github.com/acme/api/pull/2"], "Waiting on the author")
+        self.assertEqual(by_url["https://github.com/acme/api/pull/2"],
+                         "Waiting on the author · 0 of 2 approvals")
         self.assertEqual(by_url["https://github.com/acme/api/pull/3"],
                          "GitHub draft, not ready for review")
         self.assertEqual(by_url["https://github.com/acme/api/pull/4"], "Not on you")
@@ -111,7 +112,8 @@ class BuildSectionsTest(unittest.TestCase):
         self.assertEqual(s["count"], 0)
         self.assertEqual(s["title"], "✓")    # ⚪ rows never count
         self.assertEqual([e["reason"] for e in s["other"]][:2],
-                         ["Waiting on the author", "0 approvals, no change requests"])
+                         ["Waiting on the author · 0 of 2 approvals",
+                          "0 approvals, no change requests"])
 
     def test_other_prs_needs_you_mixes_follow_ups_and_reviews_by_severity(self):
         def job(pr_id, blocking):

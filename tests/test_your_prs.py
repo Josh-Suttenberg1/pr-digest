@@ -178,13 +178,15 @@ class YourPrsSectionTest(unittest.TestCase):
         [e] = menu.build_sections(self.data([row]), [], nick={"plaxdan": "Woods"},
                                   now=NOW)["mine"]
         self.assertEqual(menu.row_text(e),
-                         "🟡 ABC-9168 · Reply to Woods: 1 suggestion, 2 nits · 2d · thing 9168")
+                         "🟡 ABC-9168 · Reply to Woods: 1 suggestion, 2 nits · 2 of 2 approvals · "
+                         "2d · thing 9168")
         self.assertEqual(e["why"], "Why it's yellow: 3 comments from Woods are unanswered; "
                                    "only nits and suggestions are waiting")
         waiting = mine_row(1, answered=[cr], approvals=1)
         [w] = menu.build_sections(self.data([waiting]), [], nick={"mthomas46": "Mykal"},
                                   now=NOW)["mine"]
-        self.assertEqual(menu.row_text(w), "🟡 ABC-1 · Waiting on re-review: Mykal · 7d · thing 1")
+        self.assertEqual(menu.row_text(w), "🟡 ABC-1 · Waiting on re-review: Mykal · "
+                                           "1 of 2 approvals · 7d · thing 1")
 
     def test_sub_headers_appear_once_each_above_their_rows(self):
         rows = [mine_row(1, approvals=2), mine_row(2),
@@ -287,9 +289,9 @@ class NotificationTest(unittest.TestCase):
         href = W.notification_href(snap, [], {"watcher": {}}, dry_run=True)
         n = render.render_pr(snap, "red", "Woods left 2 comments (1 suggestion, 1 nit)", [e],
                              self.NICK, href)
-        self.assertEqual(n["title"], "🔴 ABC-5915 · Woods left 2 comments (1 suggestion, 1 nit)")
+        self.assertEqual(n["title"], "🔴 Woods approved ABC-5915 with 2 comments")
         self.assertEqual(n["subtitle"], "Show the exact total")
-        self.assertEqual(n["body"], "Woods: add a test")
+        self.assertEqual(n["body"], "Woods left 2 comments (1 suggestion, 1 nit) · Woods: add a test")
         self.assertTrue(n["href"].startswith("prdigest://respond?pr="))
         self.assertEqual(view_draft.validated_pr(n["href"], {"org": "avetta"}), PR)
 
@@ -301,7 +303,25 @@ class NotificationTest(unittest.TestCase):
                    "first_line": "", "url": "blocking-url", "blocking": True, "path": "B.elm"}]
         n = render.render_pr(pr_ref, "red", "Mykal responded to 2 of your comments, 1 blocking",
                              events, self.NICK, "file:///page.html")
-        self.assertEqual(n["body"], "Mykal replied: ok · the code changed under your comment on B.elm")
+        self.assertEqual(n["title"], "🔴 Mykal changed the code under your comment on ABC-5915 "
+                                     "(+1 more)")
+        self.assertEqual(n["body"], "Mykal responded to 2 of your comments, 1 blocking · "
+                                    "Mykal replied: ok · the code changed under your comment on B.elm")
+
+    def test_the_title_names_who_did_what_to_which_ticket(self):
+        snap = snapshot()
+        cases = [({"type": "decision", "state": "APPROVED", "actor": "mthomas46", "count": 0},
+                  "🟡 Mykal approved ABC-5915"),
+                 ({"type": "decision", "state": "CHANGES_REQUESTED", "actor": "plaxdan",
+                   "count": 1}, "🟡 Woods requested changes on ABC-5915 with 1 comment"),
+                 ({"type": "comments", "actor": "plaxdan", "count": 3},
+                  "🟡 Woods left 3 comments on ABC-5915"),
+                 ({"type": "rerequest", "actor": "plaxdan"},
+                  "🟡 Woods re-requested your review on ABC-5915"),
+                 ({"type": "mention", "actor": "plaxdan"}, "🟡 Woods mentioned you on ABC-5915")]
+        for event, title in cases:
+            self.assertEqual(render.render_pr(snap, "yellow", "x", [event], self.NICK, "h")["title"],
+                             title)
 
 
 class RespondLinkTest(unittest.TestCase):
