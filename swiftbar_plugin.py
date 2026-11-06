@@ -11,8 +11,9 @@ Every PR is classified once by triage/priority.py, which gives it a section, a c
 (🔴 needs you now, 🟡 waiting a while, 🟢 new, or no dot) and the reason in words.
 Each row reads `<dot> <ticket> · <what happened> · <PR title>`; a grey legend at the
 top explains the dots. Sections, top to bottom:
-  1. Your PRs — every open PR you author (triage/mine.py). The submenu says why it's
-     red, where review stands (approvals with dates, change requests and whose move
+  1. My PRs — every open PR you author (triage/mine.py), under the sub-headers
+     Needs you, Waiting on others and Ready. The submenu says why it has its dot,
+     where review stands (approvals with dates, change requests and whose move
      each is, who hasn't reviewed), every comment to answer by kind and linked to its
      thread, and a Claude session to work through them. GitHub drafts with nothing to
      answer collapse into one submenu.
@@ -304,10 +305,11 @@ def build_sections(data: dict, followup_jobs: list[dict],
     priority.classify result (url, title, section, color, reason, why, waiting_since,
     activity_at, dismissed, row | st, jobs).
 
-    Each PR appears in exactly one section. Inside a section rows go red, yellow,
-    green, then no dot; inside a color the longest wait first, except Reviews you owe,
-    which keeps reviews.ranked() order. GitHub drafts of yours with no dot collapse
-    into `mine_drafts`. `dismissed` maps a PR url to the activity time it was
+    Each PR appears in exactly one section. My PRs go by sub-header (Needs you,
+    Waiting on others, Ready: priority.MINE_GROUPS), then as below. Inside a section
+    rows go red, yellow, green, then no dot; inside a color the longest wait first,
+    except Reviews you owe, which keeps reviews.ranked() order. GitHub drafts of yours
+    with no dot collapse into `mine_drafts`. `dismissed` maps a PR url to the activity time it was
     dismissed at; the row loses its dot until something newer happens.
 
     `title` is the menu-bar title (priority.title) and `count` the PRs with a dot."""
@@ -326,7 +328,8 @@ def build_sections(data: dict, followup_jobs: list[dict],
                    and not e["dismissed"]]
     mine_rows = [e for e in mine_rows if e not in mine_drafts]
     mine_rows.sort(key=lambda e: e["row"].get("updated_at") or "", reverse=True)
-    mine_rows.sort(key=priority.sort_key)
+    mine_rows.sort(key=lambda e: (priority.MINE_GROUP_ORDER.get(e.get("group"), 9),
+                                  *priority.sort_key(e)))
     followups = sorted((e for e in entries if e["section"] == priority.FOLLOWUP),
                        key=priority.sort_key)
     owed = sorted((e for e in entries if e["section"] == priority.OWED),
@@ -450,6 +453,8 @@ def review_status(key: str, head: str) -> dict:
 
 
 ROW_MAX = 100
+# Leading non-breaking spaces that indent a sub-header under its section name.
+SUBHEAD_INDENT = "\u00a0\u00a0\u00a0"
 
 
 def row_text(e: dict, limit: int = ROW_MAX) -> str:
@@ -580,8 +585,10 @@ def review_lines(row: dict, nick: dict[str, str], required: int) -> list[tuple[s
     decided = {a["author"] for a in approvals}
     lines = []
     if approvals:
-        each = ", ".join(f"{_who(a['author'], nick)} {when(a.get('at'))}".strip()
-                         for a in approvals)
+        each = ", ".join(
+            f"{_who(a['author'], nick)} {when(a.get('at'))}".strip()
+            + ("" if a.get("on_head", True) else " (before the latest push)")
+            for a in approvals)
         lines.append((f"Approvals: {len(approvals)} of {required} ({each})",
                       approvals[-1].get("url") or url))
     else:
@@ -633,6 +640,18 @@ def mine_block(e: dict, nick: dict[str, str], required: int) -> None:
     # The ⌥ alternate goes after the submenu: SwiftBar hangs `--` lines on the item
     # just above them, so placing it first would give the submenu to the alternate.
     _dismiss(e)
+
+
+def mine_rows(entries: list[dict], nick: dict[str, str], required: int) -> None:
+    """Your PRs, each sub-header (priority.MINE_GROUPS) once above its rows. `entries`
+    come sorted by sub-header (build_sections)."""
+    group = None
+    for e in entries:
+        if e.get("group") != group:
+            group = e.get("group")
+            if group in priority.MINE_GROUPS:
+                emit(SUBHEAD_INDENT + priority.MINE_GROUPS[group], color="#888888", size="12")
+        mine_block(e, nick, required)
 
 
 def mine_drafts_block(entries: list[dict]) -> None:
@@ -841,9 +860,8 @@ def render_menu(sections: dict, *, spinner: bool, error: str | None,
     else:
         emit(priority.LEGEND + " · hold ⌥ to dismiss", color="#888888", size="12")
         print("---")
-        emit("Your PRs", color="#888888")
-        for e in sections["mine"]:
-            mine_block(e, nick, required)
+        emit(priority.SECTION_NAMES[priority.MINE], color="#888888")
+        mine_rows(sections["mine"], nick, required)
         if sections["mine_drafts"]:
             mine_drafts_block(sections["mine_drafts"])
         if not sections["mine"] and not sections["mine_drafts"]:

@@ -153,26 +153,114 @@ def mine_row(n, waiting=False, **kw):
     return {**base, **kw}
 
 
-class MineRulesTest(unittest.TestCase):
-    def test_anything_waiting_on_you_is_red_nits_included(self):
-        row = mine_row(1, True, threads_waiting=[
-            {"author": "plaxdan", "kind": "nit", "last_at": "2026-11-04T10:00:00Z"}])
-        p = P.mine(row, NICK)
-        self.assertEqual((p["color"], p["reason"]), (P.RED, "Woods left 1 comment (1 nit)"))
+def appr(login, at="2026-11-03T18:00:00Z", on_head=True):
+    return {"author": login, "at": at, "url": "", "on_head": on_head}
+
+
+def ask(kind, author="plaxdan", at="2026-11-02T18:00:00Z"):
+    return {"author": author, "kind": kind, "last_at": at}
+
+
+def mine_p(row):
+    return P.mine(row, NICK, now=NOW)
+
+
+class MineNeedsYouTest(unittest.TestCase):
+    def test_only_nits_and_suggestions_are_yellow(self):
+        p = mine_p(mine_row(1, True, threads_waiting=[ask("nit"), ask("suggestion")]))
+        self.assertEqual((p["group"], p["color"]), (P.NEEDS, P.YELLOW))
+        self.assertEqual(p["reason"], "Reply to Woods: 1 suggestion, 1 nit · 2d")
+        self.assertIn("only nits and suggestions", p["why"])
+
+    def test_a_question_a_blocking_or_an_unlabeled_comment_is_red(self):
+        for kind in ("question", "blocking", "comment"):
+            p = mine_p(mine_row(1, True, threads_waiting=[ask("nit"), ask(kind)]))
+            self.assertEqual((kind, p["color"]), (kind, P.RED))
 
     def test_change_request_not_yet_rerequested_is_red(self):
         row = mine_row(1, True, blockers=[{"author": "mthomas46", "at": "2026-11-04T10:00:00Z"}],
-                       threads_waiting=[{"author": "mthomas46", "kind": "question",
-                                         "last_at": "2026-11-04T10:00:00Z"}])
-        p = P.mine(row, NICK)
-        self.assertEqual(p["reason"], "Mykal requested changes with 1 comment (1 question)")
+                       threads_waiting=[ask("question", "mthomas46", "2026-11-04T10:00:00Z")])
+        p = mine_p(row)
+        self.assertEqual((p["group"], p["color"]), (P.NEEDS, P.RED))
+        self.assertEqual(p["reason"], "Answer Mykal's change request: 1 question · today")
 
-    def test_nothing_to_answer_has_no_dot_and_says_what_it_waits_on(self):
-        self.assertEqual(P.mine(mine_row(1, approvals=[{"author": "a"}, {"author": "b"}]),
-                                NICK)["reason"], "Approved, 2 of 2")
-        self.assertEqual(P.mine(mine_row(1), NICK),
-                         {**P.mine(mine_row(1), NICK), "color": None,
-                          "reason": "Waiting on reviews, 0 of 2 approvals"})
+    def test_comments_from_others_than_the_change_requester_get_their_own_part(self):
+        row = mine_row(1, True, blockers=[{"author": "mthomas46", "at": "2026-11-04T10:00:00Z"}],
+                       threads_waiting=[ask("nit")])
+        self.assertEqual(mine_p(row)["reason"],
+                         "Answer Mykal's change request · Reply to Woods: 1 nit · 2d")
+
+
+class MineNotOnYouTest(unittest.TestCase):
+    def test_ready_needs_the_approvals_on_the_latest_push(self):
+        p = mine_p(mine_row(1, approvals=[appr("plaxdan"), appr("kylerscharpen")]))
+        self.assertEqual((p["group"], p["color"], p["reason"]),
+                         (P.READY, None, "Ready: approved 2 of 2 on the latest push"))
+
+    def test_approvals_before_the_latest_push_need_re_approval(self):
+        row = mine_row(1, approvals=[appr("plaxdan", on_head=False), appr("kylerscharpen")],
+                       head_at="2026-11-04T16:00:00Z")
+        p = mine_p(row)
+        self.assertEqual((p["group"], p["color"]), (P.NEEDS, P.YELLOW))
+        self.assertEqual(p["reason"], "Needs re-approval from Woods · today")
+        self.assertEqual(p["why"], "Why it's yellow: 1 of 2 approvals are on the latest push; "
+                                   "Woods's approval predates it")
+
+    def test_a_dismissed_re_approval_comes_back_on_the_next_push(self):
+        row = mine_row(1, approvals=[appr("plaxdan", on_head=False), appr("kylerscharpen",
+                                                                          on_head=False)],
+                       head_at="2026-11-04T16:00:00Z")
+        p = P.mine(row, NICK, dismissed_at="2026-11-04T16:00:00Z", now=NOW)
+        self.assertEqual((p["color"], p["dismissed"]), (None, True))
+        row["head_at"] = "2026-11-04T17:00:00Z"
+        self.assertEqual(mine_p(row)["color"], P.YELLOW)
+
+    def test_waiting_on_review_names_who_and_since_when(self):
+        row = mine_row(1, approvals=[appr("plaxdan")], requested=["mthomas46", "kylerscharpen"],
+                       requested_since={"mthomas46": "2026-11-04T15:00:00Z",
+                                        "kylerscharpen": "2026-11-04T16:00:00Z"})
+        p = mine_p(row)
+        self.assertEqual((p["group"], p["color"]), (P.WAITING, None))
+        self.assertEqual(p["reason"], "Waiting on review: Mykal and Kyler · 1 of 2 approvals · today")
+
+    def test_a_wait_past_two_days_turns_yellow_as_a_nudge(self):
+        row = mine_row(1, requested=["mthomas46"],
+                       requested_since={"mthomas46": "2026-11-01T12:00:00Z"})
+        p = mine_p(row)
+        self.assertEqual((p["group"], p["color"]), (P.WAITING, P.YELLOW))
+        self.assertEqual(p["reason"], "Waiting on review: Mykal · 0 of 2 approvals · 3d")
+        self.assertEqual(p["why"], "Why it's yellow: waiting 3 days, time to nudge Mykal")
+
+    def test_two_days_exactly_is_not_yet_stale(self):
+        row = mine_row(1, requested=["mthomas46"],
+                       requested_since={"mthomas46": "2026-11-02T18:00:00Z"})
+        self.assertIsNone(mine_p(row)["color"])
+
+    def test_waiting_on_re_review_says_who_since_when_and_why(self):
+        cr = {"author": "mthomas46", "at": "2026-10-30T06:00:00Z",
+              "rerequested_at": "2026-11-03T20:00:00Z"}
+        p = mine_p(mine_row(1, answered_change_requests=[cr], approvals=[appr("plaxdan")]))
+        self.assertEqual((p["group"], p["color"]), (P.WAITING, None))
+        self.assertEqual(p["reason"], "Waiting on re-review: Mykal · 1d")
+        self.assertEqual(p["why"], "Why: Mykal requested changes 5 days ago and you "
+                                   "re-requested them yesterday")
+
+    def test_a_re_requested_approver_is_a_re_review(self):
+        row = mine_row(1, approvals=[appr("plaxdan"), appr("kylerscharpen")],
+                       requested=["plaxdan"], requested_since={"plaxdan": "2026-11-04T17:00:00Z"})
+        p = mine_p(row)
+        self.assertEqual(p["reason"], "Waiting on re-review: Woods · today")
+        self.assertEqual(p["why"], "Why: you re-requested Woods after their approval")
+
+    def test_no_reviewer_requested_and_drafts_have_no_age(self):
+        self.assertEqual(mine_p(mine_row(1))["reason"], "No reviewer requested · 0 of 2 approvals")
+        self.assertEqual(mine_p(mine_row(1, isDraft=True))["reason"],
+                         "GitHub draft, nothing to answer")
+
+    def test_age_is_today_or_days(self):
+        self.assertEqual(P.age("2026-11-04T15:00:00Z", NOW), "today")
+        self.assertEqual(P.age("2026-10-30T15:00:00Z", NOW), "5d")
+        self.assertEqual(P.age("", NOW), "")
 
 
 class OrderAndTitleTest(unittest.TestCase):

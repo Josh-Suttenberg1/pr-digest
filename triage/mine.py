@@ -16,9 +16,12 @@ Bots never count: a comment from a GitHub App (`__typename` Bot), a login ending
 a Copilot thread or a Snyk status comment never puts a PR on you.
 
 Alongside what's waiting, it reports where review stands: `approvals` (each standing
-approval with its place in line, so the second approver shows as 2 of 2),
-`requested` (reviewers asked for a review who haven't given one since), and for every
-comment to answer its `kind` (triage/comment_kind.py) and a one-line `summary`.
+approval with its place in line, so the second approver shows as 2 of 2, the commit it
+was given on, and `on_head`, whether that commit is the PR's current head),
+`requested` (reviewers asked for a review who haven't given one since) with
+`requested_since` (when each was last asked), `head_oid` and `head_at` (the head
+commit and its commit time), and for every comment to answer its `kind`
+(triage/comment_kind.py) and a one-line `summary`.
 
 A reviewer's standing decision is their latest APPROVED, CHANGES_REQUESTED or
 DISMISSED review, as GitHub counts it: a later plain comment doesn't withdraw an
@@ -46,13 +49,14 @@ query($owner:String!,$name:String!,$num:Int!){
     pullRequest(number:$num){
       isDraft
       reviewDecision
-      commits(last:1){nodes{commit{committedDate author{user{login}}}}}
+      headRefOid
+      commits(last:1){nodes{commit{oid committedDate author{user{login}}}}}
       reviewThreads(first:100){nodes{
         isResolved
         isOutdated
         comments(first:100){nodes{author{login __typename} createdAt path body url}}
       }}
-      reviews(first:100){nodes{author{login __typename} state submittedAt body url}}
+      reviews(first:100){nodes{author{login __typename} state submittedAt body url commit{oid}}}
       comments(first:100){nodes{author{login __typename} createdAt body url}}
       timelineItems(last:100,itemTypes:[REVIEW_REQUESTED_EVENT]){nodes{
         ... on ReviewRequestedEvent{createdAt requestedReviewer{... on User{login}}}
@@ -143,8 +147,13 @@ def analyze(pr: dict, me: str, bots: set[str] | frozenset = frozenset()) -> dict
             continue
         if rv.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
             latest_by_author[_login(rv)] = rv  # reviews come in chronological order
+    head_oid = pr.get("headRefOid") or ""
     approvals = [
-        {"author": a, "at": rv.get("submittedAt") or "", "url": rv.get("url", "")}
+        {"author": a, "at": rv.get("submittedAt") or "", "url": rv.get("url", ""),
+         "commit": (rv.get("commit") or {}).get("oid") or "",
+         # Unknown when either oid is missing; that counts as on the head, so a
+         # snapshot without oids reads the way it did before they were fetched.
+         "on_head": _on_head((rv.get("commit") or {}).get("oid") or "", head_oid)}
         for a, rv in latest_by_author.items() if rv["state"] == "APPROVED"
     ]
     approvals.sort(key=lambda x: x["at"])
@@ -198,6 +207,10 @@ def analyze(pr: dict, me: str, bots: set[str] | frozenset = frozenset()) -> dict
         if name and name.lower() not in bots:
             requested.append(name)
 
+    head_at = ""
+    for c in pr["commits"]["nodes"]:
+        head_at = max(head_at, (c.get("commit") or {}).get("committedDate") or "")
+
     return {
         "threads_waiting": threads_waiting,
         "changes_requested": changes_requested,
@@ -206,7 +219,15 @@ def analyze(pr: dict, me: str, bots: set[str] | frozenset = frozenset()) -> dict
         "unanswered_comments": unanswered_comments,
         "approvals": approvals,
         "requested": requested,
+        # When each pending reviewer was last asked, for "waiting since".
+        "requested_since": {r: rerequested[r] for r in requested if rerequested.get(r)},
+        "head_oid": head_oid,
+        "head_at": head_at,
     }
+
+
+def _on_head(commit: str, head: str) -> bool:
+    return not commit or not head or commit == head
 
 
 def build_row(p: dict, d: dict, me: str, bots: set[str] | frozenset = frozenset()) -> dict:

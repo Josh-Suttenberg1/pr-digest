@@ -6,6 +6,7 @@ import contextlib
 import io
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 import status_report
@@ -13,11 +14,13 @@ import swiftbar_plugin as menu
 from review import view_draft
 from triage import comment_kind as ck
 from triage import mine
+from triage import priority as P
 from watcher import events as ev
 from watcher import render
 
 ME = "me-login"
 PR = "https://github.com/avetta/ui/pull/9168"
+NOW = datetime(2026, 11, 6, 18, 0, tzinfo=timezone.utc)
 
 
 class CommentKindTest(unittest.TestCase):
@@ -93,6 +96,26 @@ class ApprovalsTest(unittest.TestCase):
         self.assertEqual([b["author"] for b in a["blockers"]], ["rev"])
         self.assertEqual([x["author"] for x in a["approvals"]], ["ok"])
 
+    def test_each_approval_says_whether_it_is_on_the_head_commit(self):
+        old = {**review("plaxdan", "APPROVED", "2026-11-03T10:00:00Z"), "commit": {"oid": "aaa"}}
+        new = {**review("kyler", "APPROVED", "2026-11-04T10:00:00Z"), "commit": {"oid": "bbb"}}
+        pr = {**gql(reviews=[old, new], requested=[{"login": "mthomas46"}]),
+              "headRefOid": "bbb",
+              "commits": {"nodes": [{"commit": {"oid": "bbb", "committedDate":
+                                                "2026-11-04T09:00:00Z", "author": None}}]},
+              "timelineItems": {"nodes": [
+                  {"createdAt": "2026-11-02T10:00:00Z", "requestedReviewer": {"login": "mthomas46"}},
+                  {"createdAt": "2026-11-04T11:00:00Z", "requestedReviewer": {"login": "mthomas46"}}]}}
+        a = mine.analyze(pr, ME)
+        self.assertEqual([(x["author"], x["commit"], x["on_head"]) for x in a["approvals"]],
+                         [("plaxdan", "aaa", False), ("kyler", "bbb", True)])
+        self.assertEqual((a["head_oid"], a["head_at"]), ("bbb", "2026-11-04T09:00:00Z"))
+        self.assertEqual(a["requested_since"], {"mthomas46": "2026-11-04T11:00:00Z"})
+
+    def test_an_approval_without_commit_data_counts_as_on_the_head(self):
+        a = mine.analyze(gql(reviews=[review("plaxdan", "APPROVED", "2026-11-03T10:00:00Z")]), ME)
+        self.assertTrue(a["approvals"][0]["on_head"])
+
     def test_a_dismissed_approval_does_not_count(self):
         a = mine.analyze(gql(reviews=[review("m0n01d", "APPROVED", "2026-09-09T10:00:00Z"),
                                       review("m0n01d", "DISMISSED", "2026-09-10T10:00:00Z")]), ME)
@@ -132,32 +155,48 @@ class YourPrsSectionTest(unittest.TestCase):
     def data(self, rows):
         return {"me": ME, "reviews": {}, "mine": rows, "legacy": []}
 
-    def test_red_first_then_no_dot_and_drafts_collapse(self):
+    def test_needs_you_then_waiting_then_ready_and_drafts_collapse(self):
         cr = {"author": "mthomas46", "at": "2026-10-30T06:16:00Z", "url": "",
               "rerequested_at": "2026-10-30T22:40:00Z"}
         rows = [mine_row(1, approvals=2, updated="2026-11-03T00:00:00Z"), mine_row(2),
                 mine_row(3, answered=[cr]),
-                mine_row(4, waiting=True, threads=[woods_thread("nit", "x")]),
+                mine_row(4, waiting=True, threads=[woods_thread("question", "x")]),
                 mine_row(5, draft=True)]
-        s = menu.build_sections(self.data(rows), [])
-        self.assertEqual([(e["row"]["number"], e["color"]) for e in s["mine"]],
-                         [(4, "red"), (1, None), (2, None), (3, None)])
+        s = menu.build_sections(self.data(rows), [], now=NOW)
+        self.assertEqual([(e["row"]["number"], e["group"], e["color"]) for e in s["mine"]],
+                         [(4, "needs_you", "red"), (3, "waiting", "yellow"),
+                          (2, "waiting", None), (1, "ready", None)])
         self.assertEqual([e["row"]["number"] for e in s["mine_drafts"]], [5])
-        self.assertEqual(s["count"], 1)
+        self.assertEqual(s["count"], 2)
 
-    def test_row_reads_ticket_then_what_happened_then_title(self):
+    def test_row_reads_ticket_then_the_action_then_title(self):
         cr = {"author": "mthomas46", "at": "2026-10-30T03:50:00Z", "url": "",
               "rerequested_at": "2026-10-30T23:15:00Z"}
         row = mine_row(9168, waiting=True, approvals=2, answered=[cr], threads=[
             woods_thread("suggestion", "add a test"), woods_thread("nit", "rename"),
             woods_thread("nit", "move the mock")])
-        [e] = menu.build_sections(self.data([row]), [], nick={"plaxdan": "Woods"})["mine"]
+        [e] = menu.build_sections(self.data([row]), [], nick={"plaxdan": "Woods"},
+                                  now=NOW)["mine"]
         self.assertEqual(menu.row_text(e),
-                         "🔴 ABC-9168 · Woods left 3 comments (1 suggestion, 2 nits) · thing 9168")
-        self.assertEqual(e["why"], "Why it's red: 3 comments from Woods are unanswered")
+                         "🟡 ABC-9168 · Reply to Woods: 1 suggestion, 2 nits · 2d · thing 9168")
+        self.assertEqual(e["why"], "Why it's yellow: 3 comments from Woods are unanswered; "
+                                   "only nits and suggestions are waiting")
         waiting = mine_row(1, answered=[cr], approvals=1)
-        [w] = menu.build_sections(self.data([waiting]), [], nick={"mthomas46": "Mykal"})["mine"]
-        self.assertEqual(menu.row_text(w), "ABC-1 · Waiting on Mykal to re-review · thing 1")
+        [w] = menu.build_sections(self.data([waiting]), [], nick={"mthomas46": "Mykal"},
+                                  now=NOW)["mine"]
+        self.assertEqual(menu.row_text(w), "🟡 ABC-1 · Waiting on re-review: Mykal · 7d · thing 1")
+
+    def test_sub_headers_appear_once_each_above_their_rows(self):
+        rows = [mine_row(1, approvals=2), mine_row(2),
+                mine_row(4, waiting=True, threads=[woods_thread("question", "x")])]
+        s = menu.build_sections(self.data(rows), [], now=NOW)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            menu.mine_rows(s["mine"], {}, 2)
+        top = [x.split(" | ")[0].strip("\u00a0") for x in out.getvalue().splitlines()
+               if not x.startswith("--")]
+        heads = [x for x in top if x in P.MINE_GROUPS.values()]
+        self.assertEqual(heads, ["Needs you", "Waiting on others", "Ready"])
 
     def test_submenu_belongs_to_the_row_not_its_dismiss_alternate(self):
         row = mine_row(9168, waiting=True, approvals=2,
@@ -167,7 +206,7 @@ class YourPrsSectionTest(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             menu.mine_block(s["mine"][0], {"plaxdan": "Woods"}, 2)
         lines = out.getvalue().splitlines()
-        self.assertTrue(lines[0].startswith("🔴 ABC-9168 · Woods left 1 comment (1 suggestion)"))
+        self.assertTrue(lines[0].startswith("🟡 ABC-9168 · Reply to Woods: 1 suggestion"))
         dismiss = next(i for i, x in enumerate(lines) if "alternate=true" in x)
         last_child = max(i for i, x in enumerate(lines) if x.startswith("--"))
         self.assertGreater(dismiss, last_child)
@@ -185,7 +224,8 @@ class YourPrsSectionTest(unittest.TestCase):
             status_report.write(menu.build_sections(data, []), data, {"plaxdan": "Woods"},
                                 directory=Path(tmp))
             text = (Path(tmp) / "ui#9168.md").read_text()
-        self.assertIn("**Menu section:** Your PRs", text)
+        self.assertIn("**Menu section:** My PRs", text)
+        self.assertIn("Approvals on the latest push: 1 of 2.", text)
         self.assertIn("Approvals: 1 of 2.", text)
         comments = text.split("## Comments to answer", 1)[1]
         self.assertLess(comments.index("1. Suggestion from Woods (plaxdan)"),

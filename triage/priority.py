@@ -1,17 +1,27 @@
 """Each PR's place in the menu: its section, its priority color, and why. Pure.
 
-No network, no files, no clock: the caller passes `now`. The menu, the watcher's
-notifications, the status files and the personal readouts all classify through here,
-so they never disagree about a PR's color.
+No network, no files, no clock: the caller passes `now` (mine() falls back to the
+current time when it isn't given). The menu, the watcher's notifications, the status
+files and the personal readouts all classify through here, so they never disagree
+about a PR's color.
 
 Every PR lands in exactly one section, with at most one color:
 
-  Your PRs (`MINE`), every open PR you author:
-    red      something is waiting on you (triage/mine.py `waiting`): an open thread
-             whose last human comment isn't yours, an unanswered top-level comment, or
-             a change request whose reviewer you haven't re-requested since. Nits and
-             suggestions count.
-    no dot   waiting on reviewers, approved, or a GitHub draft with nothing to answer.
+  My PRs (`MINE`), every open PR you author, under one of three sub-headers (`group`):
+    Needs you
+      red      a change request whose reviewer you haven't re-requested since, or a
+               comment to answer (an open thread whose last human comment isn't yours,
+               or an unanswered top-level comment) that isn't a nit or a suggestion.
+      yellow   only nits and suggestions are waiting; or the PR needs re-approval:
+               it has `required` approvals, but fewer than that on the head commit.
+    Waiting on others
+      no dot   waiting on a re-review (a reviewer you re-requested after their change
+               request or approval) or on a review, naming who and since when.
+      yellow   the same, once the wait passes `stale_after_days`: a cue to nudge.
+      no dot   a GitHub draft with nothing to answer, or no reviewer requested.
+    Ready
+      no dot   `required` approvals on the head commit, nothing to answer, no change
+               request standing.
 
   Follow-ups and mentions (`FOLLOWUP`), others' PRs you reviewed or commented on where
   someone responded since your last comment, and any PR where someone @mentioned you:
@@ -54,11 +64,11 @@ RED, YELLOW, GREEN, LOW = "red", "yellow", "green", "low"
 # The colors the menu-bar title counts; LOW never counts and never notifies.
 COLORS = (RED, YELLOW, GREEN)
 DOTS = {RED: "🔴", YELLOW: "🟡", GREEN: "🟢", LOW: "⚪"}
-LEGEND = "🔴 needs you now · 🟡 waiting a while · 🟢 new · ⚪ no action needed"
+LEGEND = "🔴 act now · 🟡 act soon · 🟢 new · ⚪ no action needed"
 _RANK = {None: 0, LOW: 0, GREEN: 1, YELLOW: 2, RED: 3}
 
 MINE, FOLLOWUP, OWED, OTHER = "mine", "followups", "owed", "other"
-SECTION_NAMES = {MINE: "Your PRs", FOLLOWUP: "Follow-ups and mentions",
+SECTION_NAMES = {MINE: "My PRs", FOLLOWUP: "Follow-ups and mentions",
                  OWED: "Reviews you owe", OTHER: "Non action requiring updates"}
 
 # Follow-up jobs that still stand for a response (watcher/followup.py statuses).
@@ -171,6 +181,13 @@ def followup_color(blocking: list[bool], rerequested: bool,
 
 # --- Your PRs ---------------------------------------------------------------------
 
+# My PRs' sub-headers, in menu order.
+NEEDS, WAITING, READY = "needs_you", "waiting", "ready"
+MINE_GROUPS = {NEEDS: "Needs you", WAITING: "Waiting on others", READY: "Ready"}
+MINE_GROUP_ORDER = {NEEDS: 0, WAITING: 1, READY: 2}
+# Comments on your PR that only make it yellow; any other kind makes it red.
+YELLOW_KINDS = frozenset({"nit", "suggestion"})
+
 
 def _asks(row: dict) -> list[dict]:
     """Every comment waiting on you: {author, kind, at}."""
@@ -182,69 +199,148 @@ def _asks(row: dict) -> list[dict]:
     return out
 
 
-def _kinds(kinds: list[str]) -> str:
-    """'(3 suggestions, 5 nits)'; '' when every comment is a plain comment."""
-    return f" ({comment_kind.phrase(kinds)})" if set(kinds) - {"comment"} else ""
+def age(since, now: datetime) -> str:
+    """'today' or '5d', by local calendar date; '' when unknown."""
+    then = _parse(since)
+    if not then:
+        return ""
+    days = (now.astimezone().date() - then.astimezone().date()).days
+    return "today" if days <= 0 else f"{days}d"
+
+
+def _with_age(text: str, since, now: datetime) -> str:
+    a = age(since, now)
+    return f"{text} · {a}" if a else text
+
+
+def _possessive(login: str, nick: dict[str, str]) -> str:
+    return who(login, nick) + "'s"
 
 
 def mine(row: dict, nick: dict[str, str], required: int = 2,
-         dismissed_at: str | None = None) -> dict:
-    """One of your PRs: {section, color, reason, why, waiting_since, activity_at,
-    dismissed}."""
+         dismissed_at: str | None = None, *, now: datetime | None = None,
+         stale_after_days: float = 2) -> dict:
+    """One of your PRs: {section, group, color, reason, why, waiting_since,
+    activity_at, dismissed}. `now` defaults to the current time."""
+    now = now or datetime.now(timezone.utc)
+    if row.get("waiting"):
+        p = _mine_needs_you(row, nick)
+    else:
+        p = _mine_not_on_you(row, nick, required, now, stale_after_days)
+    # A row that waits on someone ends with how long; Ready, drafts and "no reviewer
+    # requested" have nothing to age (`aged` False).
+    reason = (_with_age(p["reason"], p["waiting_since"], now) if p.pop("aged", True)
+              else p["reason"])
+    activity = p["activity_at"]
+    dismissed = bool(p["color"] and dismissed_at and activity and activity <= dismissed_at)
+    if dismissed:
+        return {**p, "section": MINE, "color": None, "reason": f"Dismissed · {reason}",
+                "why": "You dismissed this; it comes back when something new arrives",
+                "dismissed": True}
+    return {**p, "section": MINE, "reason": reason, "dismissed": False}
+
+
+def _mine_needs_you(row: dict, nick: dict[str, str]) -> dict:
+    """Something on the PR is waiting on you: red for a change request or any comment
+    that isn't a nit or a suggestion, yellow when only nits and suggestions wait."""
     asks = _asks(row)
     blockers = row.get("blockers") or []
     stamps = [a["at"] for a in asks if a["at"]] + [b.get("at") or "" for b in blockers]
-    stamps = [s for s in stamps if s]
-    activity = max(stamps, default="")
-    waiting = bool(row.get("waiting"))
-    dismissed = bool(waiting and dismissed_at and activity <= dismissed_at)
+    stamps = [x for x in stamps if x]
+    cr = _unique(b["author"] for b in blockers)
+    authors = _unique(a["author"] for a in asks)
+    kinds = [a["kind"] for a in asks]
+    n = len(asks)
+    red = bool(cr) or not kinds or any(k not in YELLOW_KINDS for k in kinds)
 
-    if waiting:
-        cr = _unique(b["author"] for b in blockers)
-        authors = _unique(a["author"] for a in asks)
-        kinds = _kinds([a["kind"] for a in asks])
-        n = len(asks)
-        parts, why = [], []
-        if cr:
-            parts.append(f"{names(cr, nick)} requested changes")
-            why.append(f"{names(cr, nick)} requested changes and you haven't "
-                       "re-requested them")
-        if asks:
-            if cr and set(authors) <= set(cr) and len(authors) == 1:
-                parts[-1] += f" with {_plural(n, 'comment')}{kinds}"
-            elif len(authors) == 1:
-                parts.append(f"{who(authors[0], nick)} left {_plural(n, 'comment')}{kinds}")
-            else:
-                parts.append(f"{_plural(n, 'comment')} to answer from "
-                             f"{names(authors, nick)}{kinds}")
-            why.append(f"{_plural(n, 'comment')} from {names(authors, nick)} "
-                       f"{'is' if n == 1 else 'are'} unanswered")
-        reason = " · ".join(parts) or "Something is waiting on you"
-        if dismissed:
-            return {"section": MINE, "color": None, "reason": f"Dismissed · {reason}",
-                    "why": "You dismissed this; it comes back when something new arrives",
-                    "waiting_since": min(stamps, default=""), "activity_at": activity,
-                    "dismissed": True}
-        return {"section": MINE, "color": RED, "reason": reason,
-                "why": "Why it's red: " + "; ".join(why),
-                "waiting_since": min(stamps, default=""), "activity_at": activity,
-                "dismissed": False}
+    parts, why = [], []
+    if cr:
+        parts.append(f"Answer {_possessive(cr[0], nick)} change request" if len(cr) == 1
+                     else f"Answer change requests from {names(cr, nick)}")
+        why.append(f"{names(cr, nick)} requested changes and you haven't re-requested them")
+    if asks:
+        if cr and set(authors) <= set(cr) and len(authors) == 1:
+            parts[-1] += f": {comment_kind.phrase(kinds)}"
+        else:
+            parts.append(f"Reply to {names(authors, nick)}: {comment_kind.phrase(kinds)}")
+        why.append(f"{_plural(n, 'comment')} from {names(authors, nick)} "
+                   f"{'is' if n == 1 else 'are'} unanswered")
+    if not red:
+        why.append("only nits and suggestions are waiting")
+    return {"group": NEEDS, "color": RED if red else YELLOW,
+            "reason": " · ".join(parts) or "Something is waiting on you",
+            "why": f"Why it's {'red' if red else 'yellow'}: " + "; ".join(why),
+            "waiting_since": min(stamps, default=""),
+            "activity_at": max(stamps, default="")}
 
+
+def _mine_not_on_you(row: dict, nick: dict[str, str], required: int, now: datetime,
+                     stale_after_days: float) -> dict:
+    """Nothing to answer: waiting on a re-review or a review (yellow once the wait
+    passes `stale_after_days`), Ready on the latest push, or needing re-approval
+    because the approvals predate it (yellow)."""
     approvals = row.get("approvals") or []
     requested = row.get("requested") or []
-    rereview = _unique([b["author"] for b in row.get("answered_change_requests") or []]
-                       + [a["author"] for a in approvals if a["author"] in requested])
-    n = len(approvals)
-    if rereview:
-        reason = f"Waiting on {names(rereview, nick)} to re-review"
-    elif n >= required:
-        reason = f"Approved, {n} of {required}"
-    elif row.get("isDraft"):
-        reason = "GitHub draft, nothing to answer"
-    else:
-        reason = f"Waiting on reviews, {n} of {required} approvals"
-    return {"section": MINE, "color": None, "reason": reason, "why": "",
-            "waiting_since": "", "activity_at": activity, "dismissed": False}
+    since_of = row.get("requested_since") or {}
+    answered = row.get("answered_change_requests") or []
+    on_head = [a for a in approvals if a.get("on_head", True)]
+    before_head = [a for a in approvals if not a.get("on_head", True)]
+    reapprovers = [a for a in approvals if a["author"] in requested]
+
+    def waiting(reason: str, who_: list[str], since: str, why: str) -> dict:
+        stale = (bool(since) and not row.get("isDraft")
+                 and days_waiting(since, now) > stale_after_days)
+        if stale:
+            why = (f"Why it's yellow: waiting {_plural(int(days_waiting(since, now)), 'day')}"
+                   f", time to nudge {names(who_, nick)}" + (f"; {why}" if why else ""))
+        elif why:
+            why = "Why: " + why
+        return {"group": WAITING, "color": YELLOW if stale else None, "reason": reason,
+                "why": why, "waiting_since": since, "activity_at": since}
+
+    if answered or reapprovers:
+        people = _unique([b["author"] for b in answered] + [a["author"] for a in reapprovers])
+        stamps = [b.get("rerequested_at") or "" for b in answered]
+        stamps += [since_of.get(a["author"]) or "" for a in reapprovers]
+        why = [f"{who(b['author'], nick)} requested changes {ago(b.get('at'), now)} and you "
+               f"re-requested them {ago(b.get('rerequested_at'), now)}" for b in answered]
+        why += [f"you re-requested {who(a['author'], nick)} after their approval"
+                for a in reapprovers]
+        if before_head:
+            why.append(f"{len(on_head)} of {required} approvals are on the latest push")
+        return waiting(f"Waiting on re-review: {names(people, nick)}", people,
+                       min((x for x in stamps if x), default=""), "; ".join(why))
+
+    if len(on_head) >= required:
+        return {"group": READY, "color": None,
+                "reason": f"Ready: approved {len(on_head)} of {required} on the latest push",
+                "why": "", "waiting_since": "", "activity_at": "", "aged": False}
+
+    if len(approvals) >= required:
+        stale_names = names([a["author"] for a in before_head], nick)
+        head_at = row.get("head_at") or ""
+        older = (f"{_possessive(before_head[0]['author'], nick)} approval predates it"
+                 if len(before_head) == 1
+                 else f"the approvals from {stale_names} predate it")
+        return {"group": NEEDS, "color": YELLOW,
+                "reason": f"Needs re-approval from {stale_names}",
+                "why": (f"Why it's yellow: {len(on_head)} of {required} approvals are on "
+                        f"the latest push; {older}"),
+                "waiting_since": head_at, "activity_at": head_at}
+
+    if row.get("isDraft"):
+        return {"group": WAITING, "color": None, "reason": "GitHub draft, nothing to answer",
+                "why": "", "waiting_since": "", "activity_at": "", "aged": False}
+
+    decided = {a["author"] for a in approvals}
+    pending = [r for r in requested if r not in decided]
+    tally = f"{len(approvals)} of {required} approvals"
+    if not pending:
+        return {"group": WAITING, "color": None,
+                "reason": f"No reviewer requested · {tally}", "why": "",
+                "waiting_since": "", "activity_at": "", "aged": False}
+    since = min((since_of.get(r) or "" for r in pending if since_of.get(r)), default="")
+    return waiting(f"Waiting on review: {names(pending, nick)} · {tally}", pending, since, "")
 
 
 # --- Follow-ups on your reviews -----------------------------------------------------
@@ -437,7 +533,8 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
     dismissed = dismissed or {}
     out: list[dict] = []
     for row in mine_rows:
-        p = mine(row, nick, required, dismissed.get(row["url"]))
+        p = mine(row, nick, required, dismissed.get(row["url"]), now=now,
+                 stale_after_days=stale_after_days)
         out.append({**p, "url": row["url"], "title": row.get("title", ""), "row": row,
                     "st": None, "jobs": []})
 

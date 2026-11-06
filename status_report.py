@@ -87,8 +87,11 @@ def _mine_facts(row: dict, nick: dict[str, str] | None = None,
     if approvals:
         facts.append(f"Approvals: {len(approvals)} of {required}.")
         for a in approvals:
+            stale = "" if a.get("on_head", True) else ", before the latest push"
             facts.append(f"  {_name(a['author'], nick)} approved at {local(a.get('at'))} "
-                         f"({a.get('ordinal')} of {required}): {a.get('url', '')}")
+                         f"({a.get('ordinal')} of {required}{stale}): {a.get('url', '')}")
+        on_head = sum(1 for a in approvals if a.get("on_head", True))
+        facts.append(f"Approvals on the latest push: {on_head} of {required}.")
     else:
         facts.append(f"Approvals: 0 of {required}.")
     for b in row.get("blockers") or []:
@@ -171,7 +174,7 @@ from triage import priority as P  # noqa: E402
 
 SECTIONS = tuple(P.SECTION_NAMES[s] for s in (P.MINE, P.FOLLOWUP, P.OWED, P.OTHER))
 
-PRIORITY_WORDS = {"red": "🔴 red (needs you now)", "yellow": "🟡 yellow (waiting a while)",
+PRIORITY_WORDS = {"red": "🔴 red (act now)", "yellow": "🟡 yellow (act soon)",
                   "green": "🟢 green (new)", "low": "⚪ low (no action needed)"}
 
 
@@ -199,7 +202,8 @@ def entries(sections: dict, data: dict, nick: dict[str, str] | None = None,
 
     for e in sections["mine"] + sections["mine_drafts"]:
         row = e["row"]
-        out.append({"url": row["url"], "title": row.get("title", ""), "section": "Your PRs",
+        out.append({"url": row["url"], "title": row.get("title", ""),
+                    "section": P.SECTION_NAMES[P.MINE],
                     "priority": _priority(e), "why": why(e),
                     "facts": _mine_facts(row, nick, required),
                     "comments": _mine_comments(row, nick)})

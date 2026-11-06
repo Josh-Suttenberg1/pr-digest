@@ -136,17 +136,26 @@ GITHUB_TOKEN=ghp_xxx python3 pr_digest.py
 For a glanceable view instead of a file, there's a [SwiftBar](https://swiftbar.app)
 plugin. Every PR gets **one row** with a priority dot, and the menu-bar title counts
 PRs per color, e.g. `🔴2 🟡1 🟢2` (`✓` when there's nothing to do). A grey legend at
-the top explains the dots: 🔴 needs you now · 🟡 waiting a while · 🟢 new · ⚪ no
-action needed. Each row
+the top explains the dots: 🔴 act now · 🟡 act soon · 🟢 new · ⚪ no action
+needed. Each row
 reads `<dot> <ticket> · <what happened> · <PR title>`, so the ticket always says which
 PR it is and truncation cuts the title, not the action. The dropdown has four
 sections, and each PR appears in exactly one:
 
-1. **Your PRs** — every open PR you author. 🔴 when anything waits on you (an open
-   thread whose last comment isn't yours, an unanswered comment, or a change request
-   you haven't re-requested), no dot otherwise, with the row saying what it's waiting
-   on (`Waiting on Joshua and Mykal to re-review`). The submenu says why it's red,
-   lists approvals with dates, change requests and whose move each is, who hasn't
+1. **My PRs** — every open PR you author, under three sub-headers:
+   - **Needs you:** 🔴 for a change request you haven't re-requested, or any comment
+     to answer that isn't a nit or a suggestion (`Answer Mykal's change request: 1
+     question · 1d`). 🟡 when only nits and suggestions wait (`Reply to Woods: 3
+     suggestions, 5 nits · today`), or when the PR needs re-approval: it has the
+     required approvals, but fewer than that on the latest push.
+   - **Waiting on others:** who you're waiting on and since when, for a review or a
+     re-review (`Waiting on re-review: Mykal · 5d`). 🟡 once the wait passes
+     `[priority] stale_after_days`, as a cue to nudge them.
+   - **Ready:** the required approvals on the latest push, nothing to answer and no
+     change request standing.
+
+   The submenu says why the row has its dot, lists approvals with dates (marking any
+   given before the latest push), change requests and whose move each is, who hasn't
    reviewed, every comment to answer by kind (Blocking / Suggestion / Question / Nit,
    linked to its thread), and **Go through these with Claude**. GitHub drafts with
    nothing to answer collapse into one submenu.

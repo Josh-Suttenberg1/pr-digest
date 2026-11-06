@@ -105,7 +105,8 @@ def pr_priority(pr: dict, cfg: dict, jobs: list[dict]) -> tuple[str | None, str]
                                       pr["url"], cfg["me"], set(cfg["watcher"]["bots"]))
         except (mine_triage.GhError, KeyError, ValueError, TypeError):
             return None, ""
-        p = priority.mine(row, nick, cfg["watcher"]["required_approvals"])
+        p = priority.mine(row, nick, cfg["watcher"]["required_approvals"],
+                          stale_after_days=cfg["priority"]["stale_after_days"])
         return p["color"], p["reason"]
     f = priority.followup([j for j in jobs if (j.get("pr") or {}).get("id") == pr["id"]],
                           nick, author=pr["author"],
