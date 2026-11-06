@@ -213,3 +213,36 @@ class RecheckTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClosedPrTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        self.tmp = tempfile.TemporaryDirectory()
+        patch = mock.patch.object(followup, "JOBS_DIR", Path(self.tmp.name))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def job(self, jid, status, pr="PR1"):
+        followup.save_job({"id": jid, "status": status, "pr": {"id": pr}})
+
+    def test_a_merged_pr_clears_every_open_job_not_just_queued_ones(self):
+        for jid, status in (("q", "queued"), ("r", "ready"), ("f", "failed"),
+                            ("p", "posted"), ("run", "running")):
+            self.job(jid, status)
+        self.job("other", "ready", pr="PR2")
+        self.assertEqual(sorted(followup.cancel_for_pr("PR1", "MERGED")), ["f", "q", "r"])
+        jobs = {j["id"]: j for j in followup.all_jobs()}
+        self.assertEqual((jobs["r"]["status"], jobs["r"]["cleared"]), ("cleared", "the PR merged"))
+        self.assertEqual([jobs[k]["status"] for k in ("p", "run", "other")],
+                         ["posted", "running", "ready"])
+
+    def test_open_jobs_on_prs_the_search_no_longer_returns_are_orphans(self):
+        jobs = [{"id": "a", "status": "ready", "pr": {"id": "PR1"}},
+                {"id": "b", "status": "posted", "pr": {"id": "PR2"}},
+                {"id": "c", "status": "failed", "pr": {"id": "PR3"}},
+                {"id": "d", "status": "running", "pr": {"id": "PR4"}}]
+        self.assertEqual(followup.orphaned_prs(jobs, {"PR3": {}}), {"PR1"})

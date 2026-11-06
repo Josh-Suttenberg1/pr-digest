@@ -315,7 +315,11 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
                 or prev[pid].get("head") != v["head"]}
         detail = gh.details(todo, bots, tok) if todo else {}
         gone = [pid for pid in prev if pid not in found["prs"]]
-        gone_states = gh.states(gone, tok) if gone else {}
+        # PRs whose follow-ups are still open but that the search no longer returns:
+        # a PR that merged on an earlier tick while a job on it was running.
+        orphans = followup.orphaned_prs(followup.all_jobs(), found["prs"]) - set(gone)
+        check = gone + sorted(orphans)
+        gone_states = gh.states(check, tok) if check else {}
     except gh.GhError as exc:
         if dry_run:
             print(f"GitHub error: {exc}", file=sys.stderr)
@@ -347,9 +351,12 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
         if gone_states.get(pid) in ("CLOSED", "MERGED") or prs[pid].get("missing_ticks", 0) >= 30:
             prs.pop(pid, None)
             if not dry_run:
-                followup.cancel_for_pr(pid)
+                followup.cancel_for_pr(pid, gone_states.get(pid) or "CLOSED")
         else:
             prs[pid]["missing_ticks"] = prs[pid].get("missing_ticks", 0) + 1
+    for pid in orphans:
+        if gone_states.get(pid) in ("CLOSED", "MERGED") and not dry_run:
+            followup.cancel_for_pr(pid, gone_states[pid])
 
     # Follow-ups you have answered yourself (replied, resolved, re-reviewed) stop counting.
     now_iso = _iso(server_now)

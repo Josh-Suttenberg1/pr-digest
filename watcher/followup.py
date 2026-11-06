@@ -10,7 +10,8 @@ the inline thread, or as a top-level comment otherwise.
   queued  -> running (detached `python -m watcher followup-run <job>`) -> ready | failed
   ready   -> posted (you clicked "Post this reply") | dismissed
   queued, ready or failed -> cleared, when you answer the thread yourself: you reply
-          in it, resolves it, or submits a new review (`cleared_jobs`, run each tick)
+          in it, resolve it, or submit a new review (`cleared_jobs`, run each tick);
+          or when the PR merges or closes (`cancel_for_pr`, `orphaned_prs`)
 
 A finished run doesn't pop up a notification: the watcher already sent the PR's one
 notification when the response arrived, and the menu row updates with the verdict.
@@ -726,11 +727,26 @@ def dismiss(jid: str) -> int:
     return 0
 
 
-def cancel_for_pr(pr_id: str) -> None:
+def cancel_for_pr(pr_id: str, state: str = "CLOSED") -> list[str]:
+    """Clear every open job (CLEARABLE) on a PR that merged or closed, so its menu row
+    goes away; returns their ids. A running job is left alone: once it finishes, the
+    next tick finds it through `orphaned_prs` and clears it then."""
+    why = "the PR merged" if state == "MERGED" else "the PR closed"
+    out = []
     for job in all_jobs():
-        if job["pr"]["id"] == pr_id and job["status"] == "queued":
-            job.update(status="dismissed", error="PR closed")
-            save_job(job)
+        if (job.get("pr") or {}).get("id") == pr_id and job.get("status") in CLEARABLE:
+            clear(job["id"], why)
+            out.append(job["id"])
+    return out
+
+
+def orphaned_prs(jobs: list[dict], open_ids) -> set[str]:
+    """Ids of PRs that have an open job (CLEARABLE) but aren't among `open_ids`, the
+    open PRs the watcher's search returned. Pure. The tick asks GitHub for their state
+    and clears the jobs of any that merged or closed."""
+    return {j["pr"]["id"] for j in jobs
+            if j.get("status") in CLEARABLE and (j.get("pr") or {}).get("id")
+            and j["pr"]["id"] not in open_ids}
 
 
 def label(job: dict) -> str:

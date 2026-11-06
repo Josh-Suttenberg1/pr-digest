@@ -309,8 +309,8 @@ def build_sections(data: dict, followup_jobs: list[dict],
     Waiting on others, Ready: priority.MINE_GROUPS), then as below. Inside a section
     rows go red, yellow, green, then no dot; inside a color the longest wait first,
     except Reviews you owe, which keeps reviews.ranked() order. GitHub drafts of yours
-    with no dot collapse into `mine_drafts`. `dismissed` maps a PR url to the activity time it was
-    dismissed at; the row loses its dot until something newer happens.
+    with no dot collapse into `mine_drafts`. `dismissed` maps a PR url to the activity
+    time it was dismissed at; the row loses its dot until something newer happens.
 
     `title` is the menu-bar title (priority.title) and `count` the PRs with a dot."""
     nick = nick or {}
