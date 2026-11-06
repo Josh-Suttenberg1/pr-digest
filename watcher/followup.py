@@ -142,9 +142,12 @@ def save_job(job: dict) -> None:
 
 
 def all_jobs() -> list[dict]:
+    """Every job file, `<job id>.json`. Other files in the folder, such as a
+    re-approval's review payload (`<job id>.reapprove.json`), aren't jobs."""
     if not JOBS_DIR.exists():
         return []
-    return [json.loads(p.read_text()) for p in sorted(JOBS_DIR.glob("*.json"))]
+    return [json.loads(p.read_text()) for p in sorted(JOBS_DIR.glob("*.json"))
+            if "." not in p.stem]
 
 
 def enqueue(event: dict) -> str | None:

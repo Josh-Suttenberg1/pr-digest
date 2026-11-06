@@ -240,6 +240,12 @@ class ClosedPrTests(unittest.TestCase):
         self.assertEqual([jobs[k]["status"] for k in ("p", "run", "other")],
                          ["posted", "running", "ready"])
 
+    def test_a_re_approval_payload_beside_the_jobs_is_not_a_job(self):
+        self.job("abc", "ready")
+        (followup.JOBS_DIR / "abc.reapprove.json").write_text('{"event": "APPROVE"}')
+        self.assertEqual([j["id"] for j in followup.all_jobs()], ["abc"])
+        self.assertEqual(followup.cancel_for_pr("PR1", "MERGED"), ["abc"])
+
     def test_open_jobs_on_prs_the_search_no_longer_returns_are_orphans(self):
         jobs = [{"id": "a", "status": "ready", "pr": {"id": "PR1"}},
                 {"id": "b", "status": "posted", "pr": {"id": "PR2"}},
