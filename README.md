@@ -145,14 +145,15 @@ sections, and each PR appears in exactly one:
 1. **My PRs** — every open PR you author, under three sub-headers:
    - **Needs you:** 🔴 for a change request you haven't re-requested, or any comment
      to answer that isn't a nit or a suggestion (`Answer Mykal's change request: 1
-     question · 1d`). 🟡 when only nits and suggestions wait (`Reply to Woods: 3
-     suggestions, 5 nits · today`), or when the PR needs re-approval: it has the
-     required approvals, but fewer than that on the latest push.
+     question · 1 of 2 approvals · 1d`). 🟡 when only nits and suggestions wait
+     (`Reply to Woods: 3 suggestions, 5 nits · 2 of 2 approvals · today`).
    - **Waiting on others:** who you're waiting on and since when, for a review or a
      re-review (`Waiting on re-review: Mykal · 5d`). 🟡 once the wait passes
      `[priority] stale_after_days`, as a cue to nudge them.
-   - **Ready:** the required approvals on the latest push, nothing to answer and no
-     change request standing.
+   - **Ready:** the required approvals, nothing to answer and no change request
+     standing. In a repo whose rules require an approval of the latest push (ui), a
+     PR with none on its head commit says `Ready · re-approve the latest push before
+     merge`, still with no dot.
 
    The submenu says why the row has its dot, lists approvals with dates (marking any
    given before the latest push), change requests and whose move each is, who hasn't
@@ -178,7 +179,15 @@ sections, and each PR appears in exactly one:
      notified.
 
 The menu-bar title counts 🔴 and 🟡 only; 🟢 new review requests show in the menu but
-don't count.
+don't count. Every row about a PR's reviews ends with its approval tally.
+
+PRs for the same Jira ticket show as one row in either section: sub-tasks under
+their parent (an epic never groups its children), and PRs in several repos that share
+a ticket key. The row takes its most urgent PR's dot and sub-header and counts its PRs
+by state (`WS-5769 · 2 PRs: 2 needs you · Record rejections on the parent form`); its
+submenu lists each PR, with its repo, and that PR's own submenu. Parents are looked
+up with `acli` and cached for a week (`[jira]` in the config; `cli = ""` turns the
+lookup off).
 
 Holding ⌥ turns a colored row into **Dismiss**: it loses its dot until something newer
 happens on the PR. The rules live in `triage/priority.py`, which the menu, the
@@ -194,9 +203,11 @@ Each refresh also writes `output/status/`: an `index.md` and one file per PR sta
 its section, its priority, the reason, and the facts behind it, so a Claude session can start from
 them. The menu's Open in Claude items point the session at that file.
 
-**Notifications** come only for PRs that turn red or yellow, one per PR, titled with
-the dot, the ticket and the reason (`🔴 ABC-123 · Mykal answered 2 of your
-comments, 1 blocking`), with a distinct chime for red and a softer one for yellow
+**Notifications** come only for PRs that turn red or yellow, one per PR. The title
+says what set it off, naming who and the ticket (`🟡 Mykal approved ABC-123`,
+`🔴 Woods requested changes on ABC-123 with 2 comments`); the body says where the PR
+stands now, approval tally included, then what was said. A distinct chime plays for
+red and a softer one for yellow
 (`[notify] red_sound` / `yellow_sound`, played with `afplay`). All of a tick's events
 on a PR make one notification; later activity at the same or a lower color only
 updates the menu, and a PR pops up again only when it rises (yellow → red) or after

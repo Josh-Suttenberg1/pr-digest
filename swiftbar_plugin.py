@@ -46,6 +46,7 @@ current.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -202,6 +203,11 @@ def collect() -> dict:
     mine_rows = M.mine_triage(me, bots)
     load_env()
     legacy = collect_prs(get_token())
+    from triage import jira
+    from triage import priority as P
+    titles = [r.get("title") or "" for r in mine_rows]
+    titles += [st.get("title") or "" for bucket in reviews.values() for st in bucket]
+    keys = {m.group(0) for t in titles for m in [P.TICKET_RE.search(t)] if m}
     return {
         "me": me,
         "reviews": {
@@ -211,6 +217,7 @@ def collect() -> dict:
         },
         "mine": mine_rows,
         "legacy": legacy,
+        "groups": jira.groups(keys, cfg),
         "error": None,
     }
 
@@ -295,6 +302,41 @@ def _priority_settings() -> dict:
         return {"stale_after_days": 2, "max_engaged_for_stale": 1}
 
 
+def _group_key(e: dict, groups: dict[str, dict]) -> str:
+    key = priority.ticket(e.get("title") or "", e["url"])
+    return (groups.get(key) or {}).get("key") or key
+
+
+def grouped(entries: list[dict], groups: dict[str, dict]) -> list[dict]:
+    """`entries` (already in menu order) with every set of two or more PRs that share a
+    group key (their ticket's Jira group, or the ticket itself) replaced by one group
+    entry at the place of its first, most urgent, child: {"kind": "group", "key",
+    "summary", "children", "color" (the most severe child's), "group" (the first
+    child's sub-header), "url", "title", "waiting_since"}."""
+    buckets: dict[str, list[dict]] = {}
+    for e in entries:
+        buckets.setdefault(_group_key(e, groups), []).append(e)
+    out, seen = [], set()
+    for e in entries:
+        g = _group_key(e, groups)
+        if g in seen:
+            continue
+        seen.add(g)
+        kids = buckets[g]
+        if len(kids) == 1:
+            out.append(e)
+            continue
+        first = priority.ticket(kids[0].get("title") or "", kids[0]["url"])
+        summary = (groups.get(first) or {}).get("summary") or _title(kids[0])
+        out.append({"kind": "group", "key": g, "summary": summary,
+                    "children": [{**k, "show_repo": True} for k in kids],
+                    "color": max((k.get("color") for k in kids), key=priority.rank),
+                    "group": kids[0].get("group"), "url": kids[0]["url"],
+                    "title": f"{g} {summary}",
+                    "waiting_since": min((k.get("waiting_since") or "~" for k in kids))})
+    return out
+
+
 def build_sections(data: dict, followup_jobs: list[dict],
                    dismissed: dict[str, str] | None = None, required: int = 2,
                    nick: dict[str, str] | None = None, now: datetime | None = None,
@@ -304,7 +346,9 @@ def build_sections(data: dict, followup_jobs: list[dict],
     Returns {"mine", "mine_drafts", "followups", "owed", "other", "others_needs",
     "others_waiting", "nothing": [entry], "counts": {color: n}, "title": str, "count":
     int}. `others_needs` is the follow-ups and reviews you owe together (Other PRs →
-    Needs you); `others_waiting` and `nothing` split `other` by its group. An entry is a
+    Needs you); `others_waiting` and `nothing` split `other` by its group. The `_view`
+    lists are what the menu draws: the same rows, with PRs that share a Jira group
+    (data["groups"], triage/jira.py) folded into one group entry (`grouped`). An entry is a
     priority.classify result (url, title, section, color, reason, why, waiting_since,
     activity_at, dismissed, row | st, jobs).
 
@@ -354,9 +398,15 @@ def build_sections(data: dict, followup_jobs: list[dict],
                             key=lambda e: e.get("waiting_since") or "~")
     nothing = [e for e in other if e.get("group") != priority.WAITING]
 
+    groups = data.get("groups") or {}
+    others = grouped(others_needs + others_waiting, groups)
+
     shown = mine_rows + followups + owed
     counts = priority.counts(shown)
     return {
+        "mine_view": grouped(mine_rows, groups),
+        "others_needs_view": [e for e in others if e.get("group") == priority.NEEDS],
+        "others_waiting_view": [e for e in others if e.get("group") != priority.NEEDS],
         "mine": mine_rows,
         "mine_drafts": mine_drafts,
         "followups": followups,
@@ -383,7 +433,24 @@ def truncate(text: str, limit: int = TITLE_MAX) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+# Prepended to every emitted line; `nested()` adds a level so a whole row, submenu and
+# all, sits inside the submenu of the row above it.
+_PREFIX = ""
+
+
+@contextlib.contextmanager
+def nested():
+    global _PREFIX
+    before = _PREFIX
+    _PREFIX += "--"
+    try:
+        yield
+    finally:
+        _PREFIX = before
+
+
 def emit(text: str = "", **params: str) -> None:
+    text = _PREFIX + text
     parts = []
     for key, value in params.items():
         value = str(value)
@@ -476,6 +543,8 @@ def row_text(e: dict, limit: int = ROW_MAX) -> str:
     the ticket first so the row always says which PR it is, then what happened, then
     as much of the title as fits."""
     key = priority.ticket(e.get("title") or "", e["url"])
+    if e.get("show_repo"):
+        key += f" ({e['url'].rstrip('/').split('/')[-3]})"
     d = priority.dot(e.get("color"))
     head = f"{d} {key}" if d else key
     head += f" · {sanitize(e.get('reason') or '')}"
@@ -666,7 +735,39 @@ def mine_rows(entries: list[dict], nick: dict[str, str], required: int) -> None:
             group = e.get("group")
             if group in priority.MINE_GROUPS:
                 emit(SUBHEAD_INDENT + priority.MINE_GROUPS[group], color="#888888", size="12")
-        mine_block(e, nick, required)
+        if e.get("kind") == "group":
+            group_block(e, lambda kid: mine_block(kid, nick, required))
+        else:
+            mine_block(e, nick, required)
+
+
+def _group_states(kids: list[dict]) -> str:
+    """'1 needs you, 1 waiting on others', by sub-header in menu order."""
+    order = list(priority.MINE_GROUPS)
+    counts: dict[str, int] = {}
+    for k in kids:
+        counts[k.get("group") or ""] = counts.get(k.get("group") or "", 0) + 1
+    return ", ".join(f"{n} {priority.MINE_GROUPS.get(g, 'other').lower()}"
+                     for g, n in sorted(counts.items(),
+                                        key=lambda x: order.index(x[0]) if x[0] in order
+                                        else len(order)))
+
+
+def group_block(e: dict, child) -> None:
+    """A Jira group: one row for the parent ticket with its most severe child's dot and
+    a count of its PRs by state, and a submenu with each child PR drawn by `child`,
+    nested one level down, so each keeps its own submenu."""
+    kids = e["children"]
+    d = priority.dot(e.get("color"))
+    head = f"{d} {e['key']}" if d else e["key"]
+    head += f" · {len(kids)} PRs: {_group_states(kids)}"
+    title = sanitize(e.get("summary") or "")
+    emit(f"{head} · {truncate(title, max(ROW_MAX - len(head) - 3, 16))}" if title else head)
+    if title:
+        emit(f"--{e['key']} · {truncate(title, 100)}", color="#888888")
+    with nested():
+        for kid in kids:
+            child(kid)
 
 
 def mine_drafts_block(entries: list[dict]) -> None:
@@ -855,15 +956,31 @@ def others_rows(sections: dict, nick: dict[str, str]) -> None:
     everything else collapsed into Nothing needed (N)."""
     emit(priority.OTHERS_NAME, color="#888888")
     groups = priority.MINE_GROUPS
-    if sections["others_needs"]:
-        emit(SUBHEAD_INDENT + groups[priority.NEEDS], color="#888888", size="12")
-        for e in sections["others_needs"]:
-            (followup_block if e["section"] == priority.FOLLOWUP else owed_block)(e, nick)
-    if sections["others_waiting"]:
-        emit(SUBHEAD_INDENT + groups[priority.WAITING], color="#888888", size="12")
-        for e in sections["others_waiting"]:
+    def one(e: dict) -> None:
+        if e.get("section") == priority.FOLLOWUP:
+            followup_block(e, nick)
+        elif e.get("section") == priority.OWED:
+            owed_block(e, nick)
+        else:
             other_block(e, nick)
-    if not sections["others_needs"] and not sections["others_waiting"]:
+
+    def row(e: dict) -> None:
+        if e.get("kind") == "group":
+            group_block(e, one)
+        else:
+            one(e)
+
+    needs = sections.get("others_needs_view", sections["others_needs"])
+    waiting = sections.get("others_waiting_view", sections["others_waiting"])
+    if needs:
+        emit(SUBHEAD_INDENT + groups[priority.NEEDS], color="#888888", size="12")
+        for e in needs:
+            row(e)
+    if waiting:
+        emit(SUBHEAD_INDENT + groups[priority.WAITING], color="#888888", size="12")
+        for e in waiting:
+            row(e)
+    if not needs and not waiting:
         emit("Nothing waiting on you", color="#6b6b70")
     if sections["nothing"]:
         emit(f"{priority.NOTHING_NAME} ({len(sections['nothing'])})", color="#888888")
@@ -899,7 +1016,7 @@ def render_menu(sections: dict, *, spinner: bool, error: str | None,
         emit(priority.LEGEND + " · hold ⌥ to dismiss", color="#888888", size="12")
         print("---")
         emit(priority.SECTION_NAMES[priority.MINE], color="#888888")
-        mine_rows(sections["mine"], nick, required)
+        mine_rows(sections.get("mine_view", sections["mine"]), nick, required)
         if sections["mine_drafts"]:
             mine_drafts_block(sections["mine_drafts"])
         if not sections["mine"] and not sections["mine_drafts"]:

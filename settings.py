@@ -83,6 +83,14 @@ DEFAULTS: dict = {
     "session": {
         "terminal": "iterm",
     },
+    # triage/jira.py: PRs whose tickets are sub-tasks of one Jira ticket show as one
+    # group in the menu. `cli` is the Jira command (Atlassian's acli); empty turns the
+    # lookup off, and only PRs sharing a ticket key group. A ticket's parent is cached
+    # for cache_days.
+    "jira": {
+        "cli": "acli",
+        "cache_days": 7,
+    },
 }
 
 

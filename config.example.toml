@@ -25,3 +25,9 @@ auto_reapprove = false
 
 [notify]
 sounds = true                    # false: every notification is silent
+
+[jira]
+# PRs for sub-tasks of one Jira ticket show as one group in the menu, titled with the
+# parent ticket. "" turns the lookup off (only PRs sharing a ticket key group).
+cli = "acli"
+cache_days = 7
