@@ -26,9 +26,14 @@ at the top explains the dots. Sections, top to bottom:
        dismissed, with the review draft's status and actions, run through
        review-drafter/menubar.sh, which calls bin/review-pr), most severe first.
      - Waiting on others: PRs you left comments on whose author hasn't responded.
+     - Done for you: ✅, what pr-digest did on its own today (auto-fixes it pushed,
+       watcher/autofix.py, and automatic re-approvals), each with its proof in the
+       submenu. Never counted; ⌥ dismisses it, and it's gone the next day.
      - Nothing needed (N): ⚪, every other open PR the GitHub searches or the triage
        turned up, with what happened in words (parked, approved, drafts). Never
        counted.
+  A PR of yours with auto-fixes in flight, stopped or dry-run lists them in its
+  submenu under Auto-fix, with each step's outcome.
 
 Each PR appears in exactly one place. Inside a sub-header rows go red, yellow, green,
 then no dot. The menu-bar title counts red and yellow PRs (`🔴2 🟡1`), or shows ✓.
@@ -229,7 +234,8 @@ def write_status(data: dict) -> None:
         required = _required_approvals()
         people = _people(fetch=True)
         status_report.write(build_sections(data, _followup_jobs(), load_dismissed(), required,
-                                           people, prio=_priority_settings()),
+                                           people, prio=_priority_settings(),
+                                           autofix_jobs=_autofix_jobs()),
                             data, people, required=required)
     except Exception:  # noqa: BLE001 — the status files must never break the menu
         pass
@@ -340,12 +346,15 @@ def grouped(entries: list[dict], groups: dict[str, dict]) -> list[dict]:
 def build_sections(data: dict, followup_jobs: list[dict],
                    dismissed: dict[str, str] | None = None, required: int = 2,
                    nick: dict[str, str] | None = None, now: datetime | None = None,
-                   prio: dict | None = None) -> dict:
+                   prio: dict | None = None, autofix_jobs: list[dict] | None = None) -> dict:
     """Sort cached data into the menu's sections through triage/priority.py.
 
     Returns {"mine", "mine_drafts", "followups", "owed", "other", "others_needs",
-    "others_waiting", "nothing": [entry], "counts": {color: n}, "title": str, "count":
-    int}. `others_needs` is the follow-ups and reviews you owe together (Other PRs →
+    "others_waiting", "nothing", "done": [entry], "counts": {color: n}, "title": str,
+    "count": int}. `done` is Done for you (priority.done_for_you): today's auto-fixes
+    (`autofix_jobs`, watcher/autofix.py) and automatic re-approvals, never counted.
+    Your PRs' entries carry their auto-fix jobs. `others_needs` is the follow-ups and
+    reviews you owe together (Other PRs →
     Needs you); `others_waiting` and `nothing` split `other` by its group. The `_view`
     lists are what the menu draws: the same rows, with PRs that share a Jira group
     (data["groups"], triage/jira.py) folded into one group entry (`grouped`). An entry is a
@@ -367,7 +376,8 @@ def build_sections(data: dict, followup_jobs: list[dict],
     entries = priority.classify(
         data.get("mine") or [], reviews, followup_jobs, nick=nick, now=now,
         required=required, stale_after_days=prio["stale_after_days"],
-        max_engaged=prio["max_engaged_for_stale"], dismissed=dismissed or {})
+        max_engaged=prio["max_engaged_for_stale"], dismissed=dismissed or {},
+        autofix=autofix_jobs or [])
 
     ranked = {st.get("pr_url"): i for i, st in enumerate(reviews.get("needs_you") or [])}
     mine_rows = [e for e in entries if e["section"] == priority.MINE]
@@ -415,6 +425,7 @@ def build_sections(data: dict, followup_jobs: list[dict],
         "others_needs": others_needs,
         "others_waiting": others_waiting,
         "nothing": nothing,
+        "done": priority.done_for_you(autofix_jobs or [], followup_jobs, nick, now),
         "counts": counts,
         "title": priority.title(shown),
         "count": sum(counts[c] for c in priority.COUNTED),
@@ -650,7 +661,8 @@ def to_answer(row: dict) -> list[dict]:
         items.append({"kind": t.get("kind") or ck.kind(body),
                       "author": t.get("author") or t.get("last_author", "?"),
                       "summary": t.get("summary") or ck.summary(body),
-                      "path": t.get("path") or "", "url": t.get("url") or "", "body": body})
+                      "path": t.get("path") or "", "url": t.get("url") or "", "body": body,
+                      "thread_id": t.get("thread_id") or ""})
     for c in row.get("unanswered_comments") or []:
         items.append({"kind": c.get("kind") or ck.kind(c.get("body", "")),
                       "author": c.get("author", "?"),
@@ -707,14 +719,20 @@ def mine_block(e: dict, nick: dict[str, str], required: int) -> None:
     for text, link in review_lines(row, nick, required):
         emit(f"--{sanitize(text)}", href=link, color="" if link else "#888888")
     asks = to_answer(row)
+    fixes = shown_fixes(e.get("autofix") or [])
+    by_thread = {j.get("thread_id"): j for j in fixes}
     if asks:
         emit("-----")
         emit(f"--To answer ({len(asks)})", color="#888888")
         for i in asks:
             where = f" · {Path(i['path']).name}" if i["path"] else ""
+            job = by_thread.get(i["thread_id"]) if i["thread_id"] else None
+            note = f" · {fix_state(job)}" if job else ""
             emit(f"--{ck.WORDS.get(i['kind'], i['kind'])} · {_who(i['author'], nick)}{where} — "
-                 f"{truncate(sanitize(i['summary']), 80)}",
+                 f"{truncate(sanitize(i['summary']), 80)}{sanitize(note)}",
                  href=i["url"] or url, tooltip=truncate(sanitize(i["body"]), 600))
+    if fixes:
+        autofix_lines(fixes, nick)
     emit("-----")
     if asks or row.get("blockers"):
         _claude_item("--Go through these with Claude", _respond_prompt(url))
@@ -724,6 +742,119 @@ def mine_block(e: dict, nick: dict[str, str], required: int) -> None:
     # The ⌥ alternate goes after the submenu: SwiftBar hangs `--` lines on the item
     # just above them, so placing it first would give the submenu to the alternate.
     _dismiss(e)
+
+
+# Auto-fix job statuses (watcher/autofix.py) shown in the PR's submenu; a finished fix
+# shows under Done for you instead, and a cleared one nowhere.
+SHOWN_FIXES = ("queued", "running", "escalated", "dry_run")
+
+
+def shown_fixes(jobs: list[dict]) -> list[dict]:
+    return [j for j in jobs if j.get("status") in SHOWN_FIXES]
+
+
+def fix_state(job: dict) -> str:
+    """One auto-fix job's state in a few words."""
+    status, dry = job.get("status"), job.get("dry_run")
+    reason = job.get("reason") or ""
+    if status in ("queued", "running"):
+        return "auto-fix dry run running" if dry else "Claude is fixing it"
+    if status == "escalated":
+        return f"{'dry run stopped' if dry else 'couldn’t auto-fix'}: {reason}"
+    if status == "dry_run":
+        return f"dry run: would commit “{job.get('summary') or ''}”"
+    return status or ""
+
+
+def autofix_lines(fixes: list[dict], nick: dict[str, str]) -> None:
+    """The PR's auto-fixes that aren't finished, each with a submenu of the steps it
+    went through, where it stopped and, for a dry run, the commit it would make."""
+    from triage import comment_kind as ck
+    emit("-----")
+    emit(f"--Auto-fix ({len(fixes)})", color="#888888")
+    for j in fixes:
+        where = Path(j.get("path") or "").name + (f":{j['line']}" if j.get("line") else "")
+        text = (f"{ck.WORDS.get(j.get('kind'), j.get('kind') or '')} · "
+                f"{_who(j.get('reviewer') or '', nick)} · {where} · {fix_state(j)}")
+        emit(f"--{truncate(sanitize(text), 110)}", tooltip=sanitize(j.get("reason") or ""))
+        if j.get("comment_url"):
+            emit("----Open the comment on GitHub", href=j["comment_url"])
+        for s in j.get("steps") or []:
+            detail = f": {s['detail']}" if s.get("detail") else ""
+            emit(f"----{'✓' if s.get('ok') else '✗'} {s.get('step')}{truncate(sanitize(detail), 90)}",
+                 color="#888888", tooltip=sanitize(s.get("detail") or ""))
+        if j.get("detail"):
+            emit(f"----{truncate(sanitize(j['detail']), 90)}", color="#888888",
+                 tooltip=truncate(sanitize(j["detail"]), 600))
+        if j.get("would_commit"):
+            emit("----Would commit:", color="#888888")
+            for line in j["would_commit"].strip().splitlines():
+                if line.strip():
+                    emit(f"----{truncate(sanitize(line), 90)}", color="#888888")
+
+
+def done_block(e: dict, nick: dict[str, str], org: str = "avetta") -> None:
+    """One PR in Done for you: what was done and when, and a submenu with the proof
+    for each fix (its commit, the reply as posted, the resolved thread) and each
+    re-approval, Open in Claude, and ⌥ Dismiss."""
+    from triage import comment_kind as ck
+    url = e["url"]
+    emit(row_text({**e, "reason": f"{e.get('reason') or ''} · {when(e.get('done_at'))}"}),
+         href=url)
+    _pr_header(e)
+    repo = url.rstrip("/").split("/")[-3]
+    for j in e.get("fixes") or []:
+        where = Path(j.get("path") or "").name
+        emit(f"--Fixed {ck.WORDS.get(j.get('kind'), j.get('kind') or '').lower()} · "
+             f"{_who(j.get('reviewer') or '', nick)}" + (f" · {where}" if where else "")
+             + f" — {truncate(sanitize(j.get('summary') or ''), 70)} · {when(j.get('done_at'))}")
+        sha = j.get("commit_sha") or ""
+        if sha:
+            emit(f"----Commit {sha[:7]}", href=f"https://github.com/{org}/{repo}/commit/{sha}")
+        if j.get("reply_text"):
+            emit("----Reply as posted:", color="#888888")
+            for line in j["reply_text"].strip().splitlines():
+                if line.strip():
+                    emit(f"----{truncate(sanitize(line), 90)}", tooltip=sanitize(line))
+        thread = j.get("reply_url") or j.get("comment_url") or url
+        emit("----Open the resolved thread" if j.get("resolved")
+             else "----Open the thread (not resolved)", href=thread)
+        if j.get("rerequested"):
+            emit(f"----Re-requested {_who(j.get('reviewer') or '', nick)}", color="#888888")
+    for j in e.get("reapprovals") or []:
+        emit(f"--Re-approved: {_who(j.get('actor') or '', nick)} did what you asked · "
+             f"{when(j.get('reapproved_at') or j.get('finished_at'))}",
+             href=j.get("posted_url") or url)
+    emit("-----")
+    _claude_item("--Open in Claude", _status_prompt(f"Let's look at my PR {url}.", url))
+    emit("--Open on GitHub", href=url)
+    ids = [f"a:{j['id']}" for j in e.get("fixes") or []]
+    ids += [f"f:{j['id']}" for j in e.get("reapprovals") or []]
+    _dismiss_line(priority.ticket(e.get("title") or "", url), bash=str(LAUNCHER),
+                  param1="--dismiss-done", param2=",".join(ids))
+
+
+def done_rows(entries: list[dict], nick: dict[str, str]) -> None:
+    """Done for you: what pr-digest did on its own today, newest first."""
+    emit(priority.SECTION_NAMES[priority.DONE_SECTION], color="#888888")
+    org = _org()
+    for e in entries:
+        done_block(e, nick, org)
+
+
+def dismiss_done(spec: str) -> None:
+    """Take Done for you rows away: `spec` is a:<id> for auto-fixes and f:<id> for
+    re-approvals, comma-separated."""
+    try:
+        from watcher import autofix, followup
+    except Exception:  # noqa: BLE001 — the menu must keep working without the watcher
+        return
+    for item in filter(None, spec.split(",")):
+        kind, _, jid = item.partition(":")
+        try:
+            (autofix.dismiss_done if kind == "a" else followup.dismiss_done)(jid)
+        except (OSError, ValueError, KeyError):
+            continue
 
 
 def mine_rows(entries: list[dict], nick: dict[str, str], required: int) -> None:
@@ -982,6 +1113,9 @@ def others_rows(sections: dict, nick: dict[str, str]) -> None:
             row(e)
     if not needs and not waiting:
         emit("Nothing waiting on you", color="#6b6b70")
+    if sections.get("done"):
+        print("---")
+        done_rows(sections["done"], nick)
     if sections["nothing"]:
         emit(f"{priority.NOTHING_NAME} ({len(sections['nothing'])})", color="#888888")
         for e in sections["nothing"]:
@@ -1095,6 +1229,22 @@ def _followup_jobs() -> list[dict]:
         return []
 
 
+def _autofix_jobs() -> list[dict]:
+    try:
+        from watcher import autofix
+        return autofix.all_jobs()
+    except Exception:  # noqa: BLE001 — the menu must render even if the watcher can't load
+        return []
+
+
+def _org() -> str:
+    try:
+        import settings
+        return settings.load()["org"]
+    except Exception:  # noqa: BLE001
+        return "avetta"
+
+
 def watcher_label() -> str:
     """One footer line on the watcher's health, from its state file."""
     path = REPO_DIR / "state" / "watcher" / "state.json"
@@ -1193,6 +1343,12 @@ def main() -> int:
         fetch_and_cache(trigger_redraw=True)
         return 0
 
+    if "--dismiss-done" in args:
+        rest = args[args.index("--dismiss-done") + 1:] + [""]
+        dismiss_done(rest[0])
+        trigger_refresh()
+        return 0
+
     for flag in ("--dismiss", "--dismiss-mine"):
         if flag in args:
             i = args.index(flag)
@@ -1216,7 +1372,8 @@ def main() -> int:
     required = _required_approvals()
     nick = _people()
     sections = build_sections(cache if have_data else {}, _followup_jobs(), load_dismissed(),
-                              required, nick, prio=_priority_settings())
+                              required, nick, prio=_priority_settings(),
+                              autofix_jobs=_autofix_jobs())
     render_menu(sections, spinner=fetching, error=cache.get("error"),
                 have_data=have_data, nick=nick, required=required)
     return 0

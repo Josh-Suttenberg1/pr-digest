@@ -13,6 +13,10 @@ Every PR lands in exactly one section, with at most one color:
                comment to answer (an open thread whose last human comment isn't yours,
                or an unanswered top-level comment) that isn't a nit or a suggestion.
       yellow   only nits and suggestions are waiting.
+      red      also when an auto-fix (watcher/autofix.py) couldn't fix a comment:
+               "Couldn't auto-fix: <reason>" leads the row.
+      no dot   every comment waiting on you is being auto-fixed ("Claude is
+               fixing …"); a comment being fixed never counts (`autofix_overlay`).
     Waiting on others
       no dot   waiting on a re-review (a reviewer you re-requested after their change
                request or approval) or on a review, naming who and since when.
@@ -53,6 +57,10 @@ Every PR lands in exactly one section, with at most one color:
   ⚪ low, with the reason in words (parked, approved, drafts). Never counted and never
   notified.
 
+  Done for you (`done_for_you`), ✅, what pr-digest did on its own today: auto-fixes it
+  pushed and automatic re-approvals it posted. Never counted, kept until dismissed or
+  the next day.
+
 A comment of yours is blocking when comment_kind tags it blocking, or when it was part
 of a CHANGES_REQUESTED review and isn't tagged nit or suggestion (`is_blocking`).
 
@@ -68,18 +76,22 @@ from datetime import datetime, timezone
 from triage import comment_kind
 
 RED, YELLOW, GREEN, LOW = "red", "yellow", "green", "low"
+# Something pr-digest did for you (Done for you): shown, never counted, never a popup
+# of its own color.
+DONE = "done"
 # The colors a row can carry besides LOW, which never counts and never notifies.
 COLORS = (RED, YELLOW, GREEN)
 # The colors the menu-bar title counts: things to act on. A new review request (green)
 # shows in the menu but leaves the title alone.
 COUNTED = (RED, YELLOW)
-DOTS = {RED: "🔴", YELLOW: "🟡", GREEN: "🟢", LOW: "⚪"}
-LEGEND = "🔴 act now · 🟡 act soon · 🟢 new · ⚪ no action needed"
-_RANK = {None: 0, LOW: 0, GREEN: 1, YELLOW: 2, RED: 3}
+DOTS = {RED: "🔴", YELLOW: "🟡", GREEN: "🟢", LOW: "⚪", DONE: "✅"}
+LEGEND = "🔴 act now · 🟡 act soon · 🟢 new · ⚪ no action needed · ✅ done for you"
+_RANK = {None: 0, LOW: 0, DONE: 0, GREEN: 1, YELLOW: 2, RED: 3}
 
-MINE, FOLLOWUP, OWED, OTHER = "mine", "followups", "owed", "other"
+MINE, FOLLOWUP, OWED, OTHER, DONE_SECTION = "mine", "followups", "owed", "other", "done"
 SECTION_NAMES = {MINE: "My PRs", FOLLOWUP: "Follow-ups and mentions",
-                 OWED: "Reviews you owe", OTHER: "Non action requiring updates"}
+                 OWED: "Reviews you owe", OTHER: "Non action requiring updates",
+                 DONE_SECTION: "Done for you"}
 
 # Follow-up jobs that still stand for a response (watcher/followup.py statuses).
 ACTIVE_JOBS = ("queued", "running", "ready", "failed")
@@ -238,14 +250,71 @@ def _possessive(login: str, nick: dict[str, str]) -> str:
     return who(login, nick) + "'s"
 
 
+# Auto-fix job statuses (watcher/autofix.py) that change a row of yours: a fix in
+# flight takes its comment off your plate, and an escalation puts it back, in red.
+FIXING_JOBS = ("queued", "running")
+ESCALATED_JOB = "escalated"
+REASON_MAX = 80
+
+
+def autofix_overlay(row: dict, jobs) -> tuple[dict, list[dict], list[tuple[dict, dict]]]:
+    """(row, fixing, escalated) for one of your PRs and its auto-fix jobs. `fixing` are
+    the open threads a fix is queued or running for, taken out of the row's
+    threads_waiting (and `waiting` recomputed); `escalated` pairs each open thread
+    with the job that couldn't fix it. A job run as a dry run changes nothing."""
+    live = [j for j in jobs or () if not j.get("dry_run")]
+    if not live:
+        return row, [], []
+    fixing_ids = {j.get("thread_id") for j in live if j.get("status") in FIXING_JOBS}
+    stuck = {j.get("thread_id"): j for j in live if j.get("status") == ESCALATED_JOB}
+    kept, fixing, escalated = [], [], []
+    for t in row.get("threads_waiting") or []:
+        tid = t.get("thread_id")
+        if tid and tid in fixing_ids:
+            fixing.append(t)
+            continue
+        kept.append(t)
+        if tid and tid in stuck:
+            escalated.append((t, stuck[tid]))
+    if fixing:
+        row = {**row, "threads_waiting": kept,
+               "waiting": bool(kept or row.get("blockers") or row.get("unanswered_comments"))}
+    return row, fixing, escalated
+
+
+def _short(text: str, limit: int = REASON_MAX) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def _fixing_phrase(fixing: list[dict], nick: dict[str, str]) -> str:
+    """'Claude is fixing Woods's nit' / 'Claude is fixing 3 comments'."""
+    authors = _unique(t.get("author") or "?" for t in fixing)
+    kinds = comment_kind.phrase(t.get("kind") or "comment" for t in fixing)
+    if len(authors) == 1 and len(fixing) == 1:
+        return f"Claude is fixing {_possessive(authors[0], nick)} {fixing[0].get('kind') or 'comment'}"
+    return f"Claude is fixing {kinds} from {names(authors, nick)}"
+
+
 def mine(row: dict, nick: dict[str, str], required: int = 2,
          dismissed_at: str | None = None, *, now: datetime | None = None,
-         stale_after_days: float = 2) -> dict:
+         stale_after_days: float = 2, autofix=()) -> dict:
     """One of your PRs: {section, group, color, reason, why, waiting_since,
-    activity_at, dismissed}. `now` defaults to the current time."""
+    activity_at, dismissed}. `now` defaults to the current time. `autofix` is the PR's
+    auto-fix jobs (`autofix_overlay`): while a fix runs its comment doesn't count, and
+    a row whose comments are all being fixed waits in Needs you with no dot; a fix that
+    escalated makes the row red."""
     now = now or datetime.now(timezone.utc)
+    row, fixing, escalated = autofix_overlay(row, autofix)
     if row.get("waiting"):
-        p = _mine_needs_you(row, nick, required)
+        p = _mine_needs_you(row, nick, required, escalated, fixing)
+    elif fixing:
+        p = {"group": NEEDS, "color": None,
+             "reason": f"{_fixing_phrase(fixing, nick)} · "
+                       f"{tally(len(row.get('approvals') or []), required)}",
+             "why": "Why no dot: Claude is fixing the comments waiting on you; the row turns "
+                    "red if it can't",
+             "waiting_since": "", "activity_at": "", "aged": False}
     else:
         p = _mine_not_on_you(row, nick, required, now, stale_after_days)
     # A row that waits on someone ends with how long; Ready, drafts and "no reviewer
@@ -261,20 +330,31 @@ def mine(row: dict, nick: dict[str, str], required: int = 2,
     return {**p, "section": MINE, "reason": reason, "dismissed": False}
 
 
-def _mine_needs_you(row: dict, nick: dict[str, str], required: int) -> dict:
-    """Something on the PR is waiting on you: red for a change request or any comment
-    that isn't a nit or a suggestion, yellow when only nits and suggestions wait."""
+def _mine_needs_you(row: dict, nick: dict[str, str], required: int,
+                    escalated=(), fixing=()) -> dict:
+    """Something on the PR is waiting on you: red for a change request, any comment
+    that isn't a nit or a suggestion, or a comment an auto-fix couldn't fix; yellow
+    when only nits and suggestions wait."""
     asks = _asks(row)
     blockers = row.get("blockers") or []
     stamps = [a["at"] for a in asks if a["at"]] + [b.get("at") or "" for b in blockers]
+    stamps += [j.get("escalated_at") or "" for _, j in escalated]
     stamps = [x for x in stamps if x]
     cr = _unique(b["author"] for b in blockers)
     authors = _unique(a["author"] for a in asks)
     kinds = [a["kind"] for a in asks]
     n = len(asks)
-    red = bool(cr) or not kinds or any(k not in YELLOW_KINDS for k in kinds)
+    red = (bool(cr) or bool(escalated) or not kinds
+           or any(k not in YELLOW_KINDS for k in kinds))
 
     parts, why = [], []
+    if escalated:
+        first = escalated[0][1].get("reason") or "it stopped"
+        parts.append(f"Couldn't auto-fix: {_short(first)}" if len(escalated) == 1
+                     else f"Couldn't auto-fix {len(escalated)} comments")
+        why += [f"Claude couldn't auto-fix {_possessive(t.get('author') or '?', nick)} "
+                f"{t.get('kind') or 'comment'}: {j.get('reason') or 'it stopped'}"
+                for t, j in escalated]
     if cr:
         parts.append(f"Answer {_possessive(cr[0], nick)} change request" if len(cr) == 1
                      else f"Answer change requests from {names(cr, nick)}")
@@ -289,6 +369,8 @@ def _mine_needs_you(row: dict, nick: dict[str, str], required: int) -> dict:
     if not red:
         why.append("only nits and suggestions are waiting")
     parts = parts or ["Something is waiting on you"]
+    if fixing:
+        parts.append(_fixing_phrase(fixing, nick))
     parts.append(tally(len(row.get("approvals") or []), required))
     return {"group": NEEDS, "color": RED if red else YELLOW,
             "reason": " · ".join(parts),
@@ -555,24 +637,111 @@ def _not_on_you(base: dict, st: dict, now: datetime, required: int = 2) -> dict:
             "reason": _with_age(reason, since, now)}
 
 
+# --- Done for you ---------------------------------------------------------------------
+
+
+def jobs_by_url(jobs) -> dict[str, list[dict]]:
+    """Jobs grouped by their PR's url (no trailing slash)."""
+    out: dict[str, list[dict]] = {}
+    for j in jobs:
+        url = ((j.get("pr") or {}).get("url") or "").rstrip("/")
+        if url:
+            out.setdefault(url, []).append(j)
+    return out
+
+
+def _on_day(epoch, day) -> bool:
+    try:
+        return bool(epoch) and datetime.fromtimestamp(int(epoch), timezone.utc).astimezone().date() == day
+    except (TypeError, ValueError, OverflowError, OSError):
+        return False
+
+
+def _fixed_phrase(fixes: list[dict], nick: dict[str, str]) -> str:
+    """'Fixed Woods's nit', 'Fixed 3 of Woods's nits, Mykal's suggestion'."""
+    by: dict[str, list[str]] = {}
+    for j in fixes:
+        by.setdefault(j.get("reviewer") or "?", []).append(j.get("kind") or "comment")
+    parts = []
+    for login, kinds in by.items():
+        if len(kinds) == 1:
+            parts.append(f"{_possessive(login, nick)} {kinds[0]}")
+            continue
+        word = (comment_kind.phrase(kinds).split(" ", 1)[1] if len(set(kinds)) == 1
+                else "comments")
+        parts.append(f"{len(kinds)} of {_possessive(login, nick)} {word}")
+    return "Fixed " + ", ".join(parts)
+
+
+def _fix_proof(fixes: list[dict]) -> str:
+    """'pushed a1b2c3d, replied, resolved'."""
+    shas = [(j.get("commit_sha") or "")[:7] for j in fixes]
+    pushed = f"pushed {shas[0]}" if len(shas) == 1 else f"pushed {len(shas)} commits"
+    n, k = len(fixes), sum(1 for j in fixes if j.get("resolved"))
+    resolved = "resolved" if k == n else "not resolved" if not k else f"resolved {k} of {n}"
+    return f"{pushed}, replied, {resolved}"
+
+
+def done_for_you(autofix_jobs: list[dict], followup_jobs: list[dict], nick: dict[str, str],
+                 now: datetime) -> list[dict]:
+    """What pr-digest did for you, one entry per PR, newest first: finished auto-fixes
+    (watcher/autofix.py status done) and automatic re-approvals (watcher/followup.py
+    status reapproved). Each shows on the local day it happened until you dismiss it
+    (`done_dismissed_at`). Never counted. An entry is {url, title, section, color,
+    reason, why, done_at (epoch seconds), fixes, reapprovals, waiting_since,
+    activity_at, dismissed}."""
+    today = now.astimezone().date()
+    fixes = [j for j in autofix_jobs if j.get("status") == "done"
+             and not j.get("done_dismissed_at") and _on_day(j.get("done_at"), today)]
+    reapprovals = [j for j in followup_jobs if j.get("status") == "reapproved"
+                   and not j.get("done_dismissed_at")
+                   and _on_day(j.get("reapproved_at") or j.get("finished_at"), today)]
+    groups: dict[str, dict] = {}
+    for key, js in (("fixes", fixes), ("reapprovals", reapprovals)):
+        for url, items in jobs_by_url(js).items():
+            g = groups.setdefault(url, {"fixes": [], "reapprovals": [],
+                                        "title": (items[0].get("pr") or {}).get("title") or ""})
+            g[key] += items
+    out = []
+    for url, g in groups.items():
+        parts = []
+        if g["fixes"]:
+            parts += [_fixed_phrase(g["fixes"], nick), _fix_proof(g["fixes"])]
+        if g["reapprovals"]:
+            who_ = names(_unique(j.get("actor") or "?" for j in g["reapprovals"]), nick)
+            parts.append(f"Re-approved: {who_} did what you asked")
+        stamps = [j.get("done_at") or 0 for j in g["fixes"]]
+        stamps += [j.get("reapproved_at") or j.get("finished_at") or 0 for j in g["reapprovals"]]
+        out.append({"url": url, "title": g["title"], "section": DONE_SECTION, "color": DONE,
+                    "reason": " · ".join(parts), "why": "", "done_at": max(stamps),
+                    "fixes": g["fixes"], "reapprovals": g["reapprovals"],
+                    "waiting_since": "", "activity_at": "", "dismissed": False})
+    out.sort(key=lambda e: -e["done_at"])
+    return out
+
+
 # --- the whole menu ------------------------------------------------------------------
 
 
 def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[dict], *,
              nick: dict[str, str], now: datetime, required: int = 2,
              stale_after_days: float = 2, max_engaged: int = 1,
-             dismissed: dict[str, str] | None = None) -> list[dict]:
+             dismissed: dict[str, str] | None = None,
+             autofix: list[dict] | None = None) -> list[dict]:
     """One entry per PR: {url, title, section, color, reason, why, waiting_since,
     activity_at, dismissed, row | st, jobs}. `reviews` is review_triage's buckets
     (needs_you in ranked order); `jobs` every follow-up job; `dismissed` url → the
-    activity time it was dismissed at."""
+    activity time it was dismissed at; `autofix` every auto-fix job, which only your
+    PRs carry (an entry's `autofix`)."""
     dismissed = dismissed or {}
+    fixes = jobs_by_url(autofix or [])
     out: list[dict] = []
     for row in mine_rows:
+        url = row["url"].rstrip("/")
         p = mine(row, nick, required, dismissed.get(row["url"]), now=now,
-                 stale_after_days=stale_after_days)
+                 stale_after_days=stale_after_days, autofix=fixes.get(url, []))
         out.append({**p, "url": row["url"], "title": row.get("title", ""), "row": row,
-                    "st": None, "jobs": []})
+                    "st": None, "jobs": [], "autofix": fixes.get(url, [])})
 
     by_url: dict[str, list[dict]] = {}
     for j in jobs:
