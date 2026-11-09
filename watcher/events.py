@@ -93,16 +93,48 @@ def _mine_items(pr: dict, me: str) -> dict[str, dict]:
     return items
 
 
-def _diff_mine(pr: dict, prev: dict | None, ctx: Ctx) -> tuple[list[dict], dict]:
-    items = _mine_items(pr, ctx.me)
+def _new_mine_items(items: dict[str, dict], prev: dict | None, ctx: Ctx) -> dict[str, dict]:
+    """The items this tick notifies about: human, not yours, not seen before, and (on
+    a PR seen for the first time) not older than the cutoff. None while seeding."""
     seen = set((prev or {}).get("seen", []))
     first_sight = prev is None
-    new = {
+    return {
         k: v for k, v in items.items()
         if k not in seen and _human(v, ctx.me)
         and not ctx.seeding
         and (not first_sight or _after_cutoff(v["created"], ctx.cutoff))
     }
+
+
+def opened_threads(pr: dict, prev: dict | None, ctx: Ctx) -> list[dict]:
+    """The unresolved review threads on your PR that a new human comment opened this
+    tick, by the same rules as its notification (`_new_mine_items`): one dict per
+    thread with its id, the opening comment and where it sits. watcher/autofix.py
+    queues its fixes from these. Empty for others' PRs."""
+    if pr["kind"] != "mine":
+        return []
+    new = _new_mine_items(_mine_items(pr, ctx.me), prev, ctx)
+    out = []
+    for t in pr["threads"]:
+        if t["resolved"] or not t["comments"]:
+            continue
+        c = t["comments"][0]
+        if f"rc:{c['id']}" not in new:
+            continue
+        out.append({
+            "thread_id": t["id"], "comment_id": c["id"], "author": c["author"],
+            "body": c.get("body") or "", "url": c.get("url"),
+            "created_at": c.get("created_at"),
+            "path": t.get("path"), "line": t.get("line") or t.get("original_line"),
+            "commit": c.get("commit"), "original_commit": c.get("original_commit"),
+            "review_state": c.get("review_state"),
+        })
+    return out
+
+
+def _diff_mine(pr: dict, prev: dict | None, ctx: Ctx) -> tuple[list[dict], dict]:
+    items = _mine_items(pr, ctx.me)
+    new = _new_mine_items(items, prev, ctx)
     state = {"kind": "mine", "seen": sorted(items)}
     if not new:
         return [], state

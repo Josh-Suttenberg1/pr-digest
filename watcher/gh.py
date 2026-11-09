@@ -43,7 +43,7 @@ DETAIL_QUERY = """
 query($ids: [ID!]!) {
   rateLimit { cost remaining }
   nodes(ids: $ids) { ... on PullRequest {
-    id number title url state updatedAt headRefOid
+    id number title url state updatedAt headRefOid headRefName baseRefName
     author { login }
     repository { name }
     latestOpinionatedReviews(first: 20, writersOnly: true) {
@@ -167,6 +167,7 @@ def normalize_pr(node: dict, kind: str, bots: set[str], extra_threads: list[dict
         "title": node.get("title") or "", "url": node["url"], "state": node.get("state"),
         "author": (node.get("author") or {}).get("login", ""),
         "head": node.get("headRefOid"), "updated_at": node.get("updatedAt"),
+        "head_ref": node.get("headRefName") or "", "base_ref": node.get("baseRefName") or "",
         "approved_by": approved_by,
         "changes_requested_by": changes_requested_by,
         "reviews": reviews,

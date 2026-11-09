@@ -54,6 +54,7 @@ query($owner:String!,$name:String!,$num:Int!){
       headRefOid
       commits(last:1){nodes{commit{oid committedDate author{user{login}}}}}
       reviewThreads(first:100){nodes{
+        id
         isResolved
         isOutdated
         comments(first:100){nodes{author{login __typename} createdAt path body url}}
@@ -143,6 +144,7 @@ def analyze(pr: dict, me: str, bots: set[str] | frozenset = frozenset()) -> dict
             # otherwise the reply that put it back on you.
             ask = comments[0] if _login(comments[0]) != me else last
             threads_waiting.append({
+                "thread_id": t.get("id") or "",
                 "path": comments[0].get("path"),
                 "last_author": _login(last),
                 "last_at": last["createdAt"],
