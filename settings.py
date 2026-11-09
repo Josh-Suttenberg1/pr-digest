@@ -72,6 +72,33 @@ DEFAULTS: dict = {
         # Played with afplay for a PR's notification, by its priority color.
         "red_sound": "/System/Library/Sounds/Glass.aiff",
         "yellow_sound": "/System/Library/Sounds/Tink.aiff",
+        # The quiet "✅ Fixed for you" notification (watcher/autofix.py).
+        "done_sound": "/System/Library/Sounds/Purr.aiff",
+    },
+    # watcher/autofix.py: fix a reviewer's nit or suggestion on your own PR, push it,
+    # reply, resolve the thread and re-request the reviewer. It commits and posts as
+    # you, so it's off by default; with dry_run on it stops before the commit.
+    "autofix": {
+        "enabled": False,
+        "dry_run": True,
+        # comment_kind kinds that qualify.
+        "categories": ["nit", "suggestion"],
+        # The assessment's confidence a fix needs before anything is edited.
+        "min_confidence": 0.9,
+        # Lines added plus removed that one fix may change.
+        "max_lines": 40,
+        # The edit prompt template; "" uses watcher/autofix_prompt.md.
+        "prompt": "",
+        # "" uses models.followup.
+        "model": "",
+        "assess_timeout": 600,
+        "edit_timeout": 900,
+        "validate_timeout": 1800,
+        # One clone per PR, as <worktrees_dir>/<repo>-<number>.
+        "worktrees_dir": str(OUTPUT_DIR / "worktrees"),
+        # repo -> the command that validates a fix, run in its worktree. A repo
+        # missing here never gets an automatic push.
+        "validate": {},
     },
     # triage/priority.py: a review you owe turns yellow once it has waited more than
     # stale_after_days with fewer than watcher.required_approvals approvals and at most

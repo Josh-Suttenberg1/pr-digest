@@ -624,7 +624,7 @@ def _settle_reapproval(job: dict, shas: list[str] | None, why: str) -> None:
     if shas:
         url = reapprove(job, shas)
         if url:
-            job.update(status="reapproved", posted_url=url)
+            job.update(status="reapproved", posted_url=url, reapproved_at=int(time.time()))
             save_job(job)
             import names
             who = names.book(fetch=True).get(job["actor"], job["actor"])
@@ -682,6 +682,14 @@ def recheck_reapprovals(snapshots: list[dict], jobs: list[dict], cfg: dict,
 # --- Your actions from the menu --------------------------------------------------------
 
 
+def reply_endpoint(repo: str, number: int, root_id: int | None, org: str = "avetta") -> str:
+    """The REST endpoint a reply posts to: a reply in the inline thread whose first
+    comment is `root_id`, or a top-level PR comment when there's no thread."""
+    if root_id:
+        return f"repos/{org}/{repo}/pulls/{number}/comments/{root_id}/replies"
+    return f"repos/{org}/{repo}/issues/{number}/comments"
+
+
 def post(jid: str) -> int:
     """Post the reply file's exact text as a threaded reply. Only the menu calls this."""
     job = load_job(jid)
@@ -703,10 +711,7 @@ def post(jid: str) -> int:
     digest = hashlib.sha256(text.encode()).hexdigest()
     if job.get("posted_sha256") == digest:
         return 0
-    if job.get("root_id"):     # a reply in the inline thread
-        endpoint = f"repos/avetta/{pr['repo']}/pulls/{pr['number']}/comments/{job['root_id']}/replies"
-    else:                      # a mention in a top-level comment or a review body
-        endpoint = f"repos/avetta/{pr['repo']}/issues/{pr['number']}/comments"
+    endpoint = reply_endpoint(pr["repo"], pr["number"], job.get("root_id"))
     proc = subprocess.run(
         ["gh", "api", "-X", "POST", endpoint, "-F", f"body=@{reply_file}", "--jq", ".html_url"],
         capture_output=True, text=True,
@@ -728,6 +733,14 @@ def dismiss(jid: str) -> int:
     job.update(status="dismissed")
     save_job(job)
     return 0
+
+
+def dismiss_done(jid: str, when: int | None = None) -> None:
+    """Take a re-approval off the menu's Done for you section. The job keeps its
+    status, so it still counts as addressed for later re-approval checks."""
+    job = load_job(jid)
+    job["done_dismissed_at"] = int(when if when is not None else time.time())
+    save_job(job)
 
 
 def cancel_for_pr(pr_id: str, state: str = "CLOSED") -> list[str]:

@@ -25,6 +25,30 @@ auto_reapprove = false
 
 [notify]
 sounds = true                    # false: every notification is silent
+# done_sound = "/System/Library/Sounds/Purr.aiff"   # the quiet "✅ Fixed for you"
+
+[autofix]
+# Fix a reviewer's nit or suggestion on your own PR when Claude rates it mechanical,
+# agrees with it and is at least min_confidence sure; then validate, commit, merge the
+# base branch if behind, push, reply, resolve the thread and re-request the reviewer.
+# It pushes and posts as you.
+enabled = false                  # nothing runs until you turn it on
+dry_run = true                   # when enabled: do everything up to the commit, then stop
+categories = ["nit", "suggestion"]
+min_confidence = 0.9
+max_lines = 40                   # lines added plus removed per fix
+prompt = ""                      # edit prompt template path; "" uses the bundled one
+model = ""                       # "" uses [models] followup
+# assess_timeout = 600
+# edit_timeout = 900
+# validate_timeout = 1800
+
+[autofix.validate]
+# repo = "command run in the fix's worktree". A repo missing here never gets an
+# automatic push; its nits escalate to you instead.
+# processservice = "sbt -batch test"
+# Leave out a repo whose commits need checks a shell command can't run, such as a
+# gate run by Claude agents or a commit hook that waits on one.
 
 [jira]
 # PRs for sub-tasks of one Jira ticket show as one group in the menu, titled with the
