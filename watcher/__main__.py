@@ -4,6 +4,9 @@
     python -m watcher status                           last poll, backoff, follow-ups
     python -m watcher post <job>[,<job>…] | dismiss <job>[,<job>…]   menu actions on follow-ups
     python -m watcher followup-run <job>               one follow-up (started by tick)
+    python -m watcher autofix-run <job | comment link> [--dry-run]
+                                                       one auto-fix (started by tick); --dry-run
+                                                       runs it up to the commit and prints it
     python -m watcher notify-test                      a red and a yellow alert, each with its sound
     python -m watcher install                          write and load the launchd jobs (the
                                                        watcher, and the weekly lessons refresh)
@@ -20,6 +23,11 @@ The stored color is dropped once the PR has no color (the row cleared: you answe
 posted the drafted replies, re-reviewed) or you dismissed its menu row
 (state/watcher/cleared.json); the next response then notifies afresh. Uncolored
 activity, green review requests and approvals never notify.
+
+Auto-fixes (watcher/autofix.py), while `[autofix] enabled` is on: a new nit or
+suggestion that opens a thread on your PR (events.opened_threads) queues a fix before
+the PR is classified, and a comment being fixed doesn't count, so it pops nothing up.
+The fix's run sends its own quiet "✅ Fixed for you", or a red alert when it escalates.
 
 A notification only links to something that exists. Yours open a Claude session on
 the PR's comments (prdigest://respond). A follow-up or mention waits in
@@ -50,7 +58,7 @@ import settings  # noqa: E402
 from watcher import events as ev  # noqa: E402
 from triage import mine as mine_triage  # noqa: E402
 from triage import priority  # noqa: E402
-from watcher import followup, gh, render, state  # noqa: E402
+from watcher import autofix, followup, gh, render, state  # noqa: E402
 
 LABEL = "com.josh.pr-digest-watcher"
 PLIST = Path(f"~/Library/LaunchAgents/{LABEL}.plist").expanduser()
@@ -105,8 +113,9 @@ def pr_priority(pr: dict, cfg: dict, jobs: list[dict]) -> tuple[str | None, str]
                                       pr["url"], cfg["me"], set(cfg["watcher"]["bots"]))
         except (mine_triage.GhError, KeyError, ValueError, TypeError):
             return None, ""
+        fixes = [j for j in autofix.all_jobs() if (j.get("pr") or {}).get("id") == pr["id"]]
         p = priority.mine(row, nick, cfg["watcher"]["required_approvals"],
-                          stale_after_days=cfg["priority"]["stale_after_days"])
+                          stale_after_days=cfg["priority"]["stale_after_days"], autofix=fixes)
         return p["color"], p["reason"]
     f = priority.followup([j for j in jobs if (j.get("pr") or {}).get("id") == pr["id"]],
                           nick, author=pr["author"],
@@ -302,6 +311,7 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
     now = time.time()
     if not dry_run and st["backoff"]["next_at"] > now:
         followup.start_queued(cfg)
+        autofix.start_queued(cfg)
         return 0
 
     me, bots = cfg["me"], set(cfg["watcher"]["bots"])
@@ -322,7 +332,8 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
         gone = [pid for pid in prev if pid not in found["prs"]]
         # PRs whose follow-ups are still open but that the search no longer returns:
         # a PR that merged on an earlier tick while a job on it was running.
-        orphans = followup.orphaned_prs(followup.all_jobs(), found["prs"]) - set(gone)
+        orphans = (followup.orphaned_prs(followup.all_jobs(), found["prs"])
+                   | autofix.orphaned_prs(autofix.all_jobs(), found["prs"])) - set(gone)
         check = gone + sorted(orphans)
         gone_states = gh.states(check, tok) if check else {}
     except gh.GhError as exc:
@@ -357,11 +368,13 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
             prs.pop(pid, None)
             if not dry_run:
                 followup.cancel_for_pr(pid, gone_states.get(pid) or "CLOSED")
+                autofix.cancel_for_pr(pid, gone_states.get(pid) or "CLOSED", cfg)
         else:
             prs[pid]["missing_ticks"] = prs[pid].get("missing_ticks", 0) + 1
     for pid in orphans:
         if gone_states.get(pid) in ("CLOSED", "MERGED") and not dry_run:
             followup.cancel_for_pr(pid, gone_states[pid])
+            autofix.cancel_for_pr(pid, gone_states[pid], cfg)
 
     # Follow-ups you have answered yourself (replied, resolved, re-reviewed) stop counting.
     now_iso = _iso(server_now)
@@ -369,7 +382,14 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
     answered = [c for pr in detail.values() if pr["kind"] == "others"
                 for c in followup.cleared_jobs(pr, jobs, me)]
     gone_jobs = {jid for jid, _ in answered}
+    fixes_answered = [c for pr in detail.values() if pr["kind"] == "mine"
+                      for c in autofix.cleared_jobs(pr, autofix.all_jobs(), me)]
+    to_fix = autofix_candidates(detail, prev, ctx, cfg)
     if not dry_run:
+        for jid, why in fixes_answered:
+            autofix.clear(jid, why)
+        for pr, t in to_fix:
+            autofix.enqueue(pr, t, cfg)
         for jid, why in answered:
             followup.clear(jid, why)
         for e in events:
@@ -396,6 +416,11 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
             print(f"-- would clear follow-up {jid}: {why}")
         for jid, outcome in rechecked:
             print(f"-- re-approval re-check for follow-up {jid}: {outcome}")
+        for jid, why in fixes_answered:
+            print(f"-- would clear auto-fix {jid}: {why}")
+        for pr, t in to_fix:
+            print(f"-- would queue an auto-fix: {pr['repo']}#{pr['number']} {t['author']}'s "
+                  f"{t['kind']} on {t.get('path')} ({t.get('url')})")
         print(f"-- {len(events)} event(s) on {len({e['pr']['id'] for e in events})} PR(s); "
               f"{len(ready)} notification(s) now, {len(pending)} waiting for drafts; "
               f"{len(todo)} PR(s) fetched in detail; cutoff {cutoff}")
@@ -412,12 +437,25 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
     if seeding:
         st["seeded_at"] = _iso(server_now)
     started, logged_out = followup.start_queued(cfg)
+    _, fixes_logged_out = autofix.start_queued(cfg)
+    logged_out = logged_out or fixes_logged_out
     if logged_out and not st["claude_auth_alerted"]:
         _notice(cfg, "⚠️ claude CLI is logged out", "Follow-ups are waiting. Run: claude auth login", "alert")
     st["claude_auth_alerted"] = logged_out
     state.save(st)
     _refresh_menu(cfg)
     return 0
+
+
+def autofix_candidates(detail: dict[str, dict], prev: dict, ctx: ev.Ctx,
+                       cfg: dict) -> list[tuple[dict, dict]]:
+    """(PR, thread) for each thread a nit or suggestion opened on your PRs this tick
+    (events.opened_threads, autofix.candidates); none while `[autofix] enabled` is off."""
+    if not cfg["autofix"]["enabled"]:
+        return []
+    return [(pr, t) for pid, pr in detail.items() if pr["kind"] == "mine"
+            for t in autofix.candidates(ev.opened_threads(pr, prev.get(pid), ctx),
+                                        cfg["autofix"]["categories"])]
 
 
 def _refresh_menu(cfg: dict) -> None:
@@ -437,6 +475,9 @@ def status(cfg: dict) -> int:
         "prs_tracked": len(st["prs"]),
         "threads_armed": sum(len(p.get("threads", {})) for p in st["prs"].values()),
         "followups": counts,
+        "autofixes": {s: sum(1 for j in autofix.all_jobs() if j["status"] == s)
+                      for s in sorted({j["status"] for j in autofix.all_jobs()})},
+        "autofix_enabled": cfg["autofix"]["enabled"], "autofix_dry_run": cfg["autofix"]["dry_run"],
         "launchd_loaded": subprocess.run(["launchctl", "print", f"gui/{_uid()}/{LABEL}"],
                                          capture_output=True).returncode == 0,
     }, indent=2))
@@ -510,6 +551,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("install")
     for name in ("post", "dismiss", "followup-run"):
         sub.add_parser(name).add_argument("job")
+    a = sub.add_parser("autofix-run")
+    a.add_argument("job", help="a job id, or (with --dry-run) a review comment link")
+    a.add_argument("--dry-run", action="store_true",
+                   help="assess, edit, scope-check and validate, then stop and print")
     args = parser.parse_args(argv)
 
     cfg = settings.load()
@@ -539,6 +584,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "followup-run":
         rc = followup.run(args.job, cfg)
         _refresh_menu(cfg)
+        return rc
+    if args.cmd == "autofix-run":
+        rc = autofix.run_command(args.job, cfg, args.dry_run)
+        if not args.dry_run:
+            _refresh_menu(cfg)
         return rc
     return 2
 
