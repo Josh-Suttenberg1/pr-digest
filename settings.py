@@ -33,7 +33,6 @@ DEFAULTS: dict = {
         "verifier_agent": "pr-review-verifier",
         "drafts_dir": str(OUTPUT_DIR / "reviews"),
         "timeout": 3600,
-        "max_concurrent": 2,
     },
     "models": {
         "followup": "sonnet",

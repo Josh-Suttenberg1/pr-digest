@@ -148,13 +148,12 @@ class InSessionReviewerTests(unittest.TestCase):
                 "workspace": str(d),
                 "review": {
                     "reviewer_agent": "pr-reviewer", "verifier_agent": verifier,
-                    "timeout": 60, "max_concurrent": 1, "drafts_dir": str(d / "drafts"),
+                    "timeout": 60, "drafts_dir": str(d / "drafts"),
                 },
             }
             envelope = {"result": verifier_result, "total_cost_usd": 1.5, "duration_ms": 1000}
             with mock.patch.object(review_pr, "RUNS_DIR", d / "runs"), \
                     mock.patch.object(review_pr, "REVIEW_INDEX_DIR", d / "index"), \
-                    mock.patch.object(review_pr, "acquire_slot", return_value=None), \
                     mock.patch.object(review_pr, "claude_logged_in", return_value=True) as login, \
                     mock.patch.object(review_pr, "run_agent", return_value=envelope) as run_agent:
                 [rec] = review_pr.review("ABC-1555", None, None, False, cfg, reviewer_output=report_path)

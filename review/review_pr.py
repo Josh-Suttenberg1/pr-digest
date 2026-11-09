@@ -25,7 +25,6 @@ with the reason as the last stderr line.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import re
@@ -201,29 +200,6 @@ def _phase(phase_file: Path | None, text: str, refresh_plugin: str | None) -> No
         )
 
 
-def acquire_slot(max_slots: int, phase_file: Path | None, refresh_plugin: str | None):
-    """Block until one of max_slots review slots is free; returns the held lock file.
-
-    Each slot is an flock on state/reviews/slots/<i>.lock. The OS releases it when the
-    process exits, so a crashed or cancelled review never leaves a slot taken.
-    """
-    slots_dir = REVIEW_INDEX_DIR / "slots"
-    slots_dir.mkdir(parents=True, exist_ok=True)
-    announced = False
-    while True:
-        for i in range(max(1, max_slots)):
-            f = (slots_dir / f"{i}.lock").open("w")
-            try:
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return f
-            except OSError:
-                f.close()
-        if not announced:
-            _phase(phase_file, f"waiting for a free review slot ({max_slots} at a time)", refresh_plugin)
-            announced = True
-        time.sleep(15)
-
-
 def _slug(target: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", target.split("github.com/")[-1]).strip("-")[:60]
 
@@ -304,7 +280,6 @@ def review(target: str, phase_file: Path | None, refresh_plugin: str | None,
         if claude_logged_in() is False:
             raise ReviewError("claude CLI is logged out. Run: claude auth login", EXIT_AUTH)
 
-    slot = acquire_slot(rcfg["max_concurrent"], phase_file, refresh_plugin)  # held until exit
     started = time.time()
 
     env1 = None
