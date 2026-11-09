@@ -43,12 +43,14 @@ model = ""                       # "" uses [models] followup
 # edit_timeout = 900
 # validate_timeout = 1800
 
+# Each repo's validation is worked out from its files: an Elm repo (elm.json) runs
+# these agents in order; an sbt build runs `sbt -batch compile Test/compile ...` with
+# the tasks its files call for; any other repo escalates.
+# elm_agents = ["elm-validation", "elm-conventions-review"]
+
 [autofix.validate]
-# repo = "command run in the fix's worktree". A repo missing here never gets an
-# automatic push; its nits escalate to you instead.
-# processservice = "sbt -batch test"
-# Leave out a repo whose commits need checks a shell command can't run, such as a
-# gate run by Claude agents or a commit hook that waits on one.
+# Overrides only: repo = "command run in the fix's worktree".
+# processservice = "sbt -batch compile Test/compile test"
 
 [jira]
 # PRs for sub-tasks of one Jira ticket show as one group in the menu, titled with the

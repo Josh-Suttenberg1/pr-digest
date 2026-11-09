@@ -253,8 +253,7 @@ class PureChecksTest(Base):
         older = autofix.preconditions({**j, "comment_commit": "b" * 40}, snap(), [], cfg)
         self.assertEqual(older[1], "the comment is on an older commit than the PR's head")
         cfg["autofix"]["validate"] = {}
-        self.assertEqual(check(snap())[1], "api has no [autofix.validate] command")
-        cfg["autofix"]["validate"] = {"api": "make test"}
+        self.assertEqual(check(snap()), ("go", ""))      # validation is planned from the clone
         running = {**self.job(), "id": "other", "status": "running", "pid": 123}
         self.assertEqual(check(snap(), [running])[1], "another auto-fix is running on this PR")
         main_branch = {**snap(), "head_ref": "main"}
@@ -321,6 +320,52 @@ class PureChecksTest(Base):
         self.assertEqual(go(snap(threads=answered, requests=asked))[1],
                          "their review is already requested")
 
+    def test_sbt_tasks_follow_the_repos_files(self):
+        def repo(name, files):
+            root = self.tmp / name
+            for rel, text in files.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+            return autofix.sbt_tasks(root)[0]
+        self.assertEqual(repo("plain", {"build.sbt": "x", "src/test/scala/A.scala": ""}),
+                         ["compile", "Test/compile", "test"])
+        self.assertEqual(repo("multi", {"build.sbt": "x", "entry/src/test/A.scala": ""}),
+                         ["compile", "Test/compile", "test"])
+        self.assertEqual(repo("scalafix", {
+            "build.sbt": 'lazy val IntegrationTest = config("it")',
+            "project/plugins.sbt": 'addSbtPlugin("ch.epfl.scala" % "sbt-scalafix" % "0.11")',
+            ".scalafix.conf": "", "test/A.scala": "",
+            "it/Mongo.scala": "MongoDBContainer // testcontainers"}),
+            ["compile", "Test/compile", "it:compile", '"scalafixAll --check"', "test"])
+        self.assertEqual(repo("embedded", {
+            "build.sbt": 'config("it")', "project/ProjectPlugin.scala": "de.flapdoodle.embed",
+            ".scalafmt.conf": "", "test/A.scala": "", "it/A.scala": ""}),
+            ["compile", "Test/compile", "it:compile", "test", "it:test"])
+        self.assertEqual(repo("it-only", {"build.sbt": 'config("it")', "it/A.scala": "localhost"}),
+                         ["compile", "Test/compile", "it:compile"])
+
+    def test_plan_validation(self):
+        wt = self.tmp / "plan"
+        wt.mkdir()
+        self.cfg["autofix"]["validate"] = {}
+        self.assertIsNone(autofix.plan_validation(wt, "api", self.cfg))
+        (wt / "build.sbt").write_text("x")
+        self.assertEqual(autofix.plan_validation(wt, "api", self.cfg)["command"],
+                         "sbt -batch compile Test/compile")
+        (wt / "elm.json").write_text("{}")
+        (wt / "package.json").write_text("{}")
+        self.assertEqual(autofix.plan_validation(wt, "ui", self.cfg)["kind"], "elm")
+        self.cfg["autofix"]["validate"] = {"ui": "make check"}
+        self.assertEqual(autofix.plan_validation(wt, "ui", self.cfg)["command"], "make check")
+
+    def test_elm_gate_result_needs_literal_passes(self):
+        g = autofix.parse_elm_gate('{"validation": "passed", "conventions": "pass"}')
+        self.assertEqual((g["validation"], g["conventions"]), ("fail", "pass"))
+        g = autofix.parse_elm_gate('x {"validation": "pass", "conventions": "maybe"} y')
+        self.assertEqual((g["validation"], g["conventions"]), ("pass", "fail"))
+        with self.assertRaises(ValueError):
+            autofix.parse_elm_gate("all good")
+
     def test_template_fills_only_known_placeholders(self):
         out = autofix.fill_template('{path}:{line} {"summary": "{x}"} {plan}',
                                     {"path": "a.py", "line": "3", "plan": "do it"})
@@ -355,7 +400,8 @@ class PipelineTest(Base):
         rc, job = self.run_fix(fake)
         self.assertEqual((rc, job["status"]), (0, "done"))
         self.assertEqual([s["step"] for s in job["steps"]],
-                         ["preconditions", "worktree", "assess", "edit", "scope", "validate",
+                         ["preconditions", "worktree", "validate-plan", "assess", "edit",
+                          "scope", "validate",
                           "scope-after-validate", "commit", "merge", "push", "reply", "resolve",
                           "rerequest"])
         self.assertTrue(all(s["ok"] for s in job["steps"]))
@@ -434,12 +480,95 @@ class PipelineTest(Base):
         self.assertEqual(job["pushed_sha"], M)
         self.assertEqual(job["commit_sha"], C)
 
-    def test_no_validate_command_escalates_before_claude_runs(self):
+    def test_a_repo_of_unknown_type_escalates_before_claude_runs(self):
         self.cfg["autofix"]["validate"] = {}
         fake = Fake()
         rc, job = self.run_fix(fake)
-        self.assertEqual((rc, job["stopped_at"]), (1, "preconditions"))
+        self.assertEqual((rc, job["stopped_at"]), (1, "validate-plan"))
+        self.assertIn("can't tell how to validate api", job["reason"])
         self.assertFalse(any(c[0] == "claude" for c in fake.calls))
+
+    def test_an_sbt_repo_validates_with_the_tasks_its_files_call_for(self):
+        self.cfg["autofix"]["validate"] = {}
+        wt = self.tmp / "worktrees" / "api-7"
+        (wt / "test").mkdir(parents=True)
+        (wt / ".git").mkdir()
+        (wt / "build.sbt").write_text("lazy val root = project")
+        fake = Fake()
+        rc, job = self.run_fix(fake)
+        self.assertEqual(job["status"], "done")
+        sh = next(c for c in fake.calls if c[0] == "/bin/sh")
+        self.assertEqual(sh[2], "sbt -batch compile Test/compile test")
+
+    def test_the_elm_gate_runs_both_agents_and_a_must_fix_escalates(self):
+        self.cfg["autofix"]["validate"] = {}
+        self.cfg["workspace"] = str(self.tmp / "ws")
+        agents = self.tmp / "ws" / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        for name in ("elm-validation", "elm-conventions-review"):
+            (agents / f"{name}.md").write_text(
+                f"---\nname: {name}\ndescription: the {name} agent\ntools: Bash, Read\n---\n\n"
+                f"# {name}\nDo the {name} things.\n")
+        wt = self.tmp / "worktrees" / "api-7"
+        (wt / "node_modules").mkdir(parents=True)
+        (wt / ".git").mkdir()
+        (wt / "elm.json").write_text("{}")
+        (wt / "package.json").write_text("{}")
+
+        class ElmFake(Fake):
+            def __init__(self, gate):
+                super().__init__()
+                self.gate = gate
+
+            def local(self, argv, **kw):
+                if argv[0] == "claude" and "--agents" in argv:
+                    self.calls.append(list(argv))
+                    return proc(argv, out=json.dumps({"result": json.dumps(self.gate)}))
+                return super().local(argv, **kw)
+
+        ok = ElmFake({"validation": "pass", "conventions": "pass", "must_fix": [],
+                      "summary": "build ok; 812 tests passed; conventions pass"})
+        _, job = self.run_fix(ok)
+        self.assertEqual(job["status"], "done")
+        gate = next(c for c in ok.calls if c[0] == "claude" and "--agents" in c)
+        defs = json.loads(gate[gate.index("--agents") + 1])
+        self.assertEqual(sorted(defs), ["elm-conventions-review", "elm-validation"])
+        self.assertEqual(defs["elm-validation"]["tools"], ["Bash", "Read"])
+        denied = gate[gate.index("--disallowedTools") + 1:]
+        self.assertIn("Bash(git push:*)", denied)
+        self.assertIn("Bash(git commit:*)", denied)
+        self.assertNotIn("npm ci --no-audit --no-fund", [c[-1] for c in ok.calls])
+
+        bad = ElmFake({"validation": "pass", "conventions": "fail",
+                       "must_fix": ["src/A.elm:3 — helpers after callers — move it"]})
+        rc, job = self.run_fix(bad)
+        self.assertEqual((rc, job["stopped_at"]), (1, "validate"))
+        self.assertEqual(job["reason"], "the conventions review found 1 must-fix: "
+                                        "src/A.elm:3 — helpers after callers — move it")
+        self.assertNotIn("commit", bad.git_subs())
+
+    def test_the_push_url_is_a_guard_except_during_the_push(self):
+        fake = Fake()
+        self.run_fix(fake)
+        configs = [c[2:] for c in fake.calls if c[:2] == ["git", "config"]]
+        self.assertEqual(configs[0], ["remote.origin.pushurl", autofix.PUSH_GUARD])
+        self.assertEqual(configs[1:], [["--unset", "remote.origin.pushurl"],
+                                       ["remote.origin.pushurl", autofix.PUSH_GUARD]])
+
+    def test_a_probe_runs_past_stale_preconditions_at_the_comments_commit(self):
+        fake = Fake()
+        fake.head = "b" * 40
+        job = self.job(comment_commit="b" * 40)
+        answered = snap(threads=[thread("T1", comment(11, REV), comment(20, ME, "done"),
+                                        resolved=True)])
+        rc = autofix.Fix(job, self.cfg, self.tools(fake, snaps=[answered]), dry_run=True,
+                         persist=False, probe=True).run()
+        self.assertEqual((rc, job["status"]), (0, "dry_run"))
+        self.assertTrue(job["steps"][0]["detail"].startswith("a live run would stop here"))
+        self.assertIn(["git", "checkout", "-q", "-f", "-B", "feature", "b" * 40], fake.calls)
+        self.assertEqual(fake.remote_calls, [])
+        self.assertNotIn("Later in the thread", fake.prompts[0])
+        self.assertNotIn("done", fake.prompts[0].split("---")[1])
 
     def test_a_reply_that_fails_after_the_push_escalates(self):
         fake = Fake(reply_rc=1)

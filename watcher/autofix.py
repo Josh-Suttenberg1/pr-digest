@@ -18,13 +18,17 @@ Every step's outcome is appended to the job's `steps`, so a stop says where it w
 
   preconditions  code, not the model: the PR is yours and open, its head is the one
                  the comment was made on (allowing for this pipeline's own pushes,
-                 `expected_head`), the thread is still waiting on you, the repo has a
-                 `[autofix.validate]` command, no local checkout of the branch has
-                 unpushed commits (`unpushed_checkouts`), and no other fix runs on the
-                 PR (a per-PR lock).
+                 `expected_head`), the thread is still waiting on you, no local
+                 checkout of the branch has unpushed commits (`unpushed_checkouts`),
+                 and no other fix runs on the PR (a per-PR lock).
   worktree       a clone of the repo at `[autofix] worktrees_dir`/<repo>-<number>
                  (borrowing objects from your clone, never sharing its branches),
-                 checked out on the PR's branch at the remote head.
+                 checked out on the PR's branch at the remote head. Its push URL is a
+                 guard that fails every push except the push step's own.
+  validate-plan  how this repo is validated, from its files (`plan_validation`): an
+                 Elm repo runs the Elm gate, an sbt build the tasks its files call for
+                 (`sbt_tasks`), `[autofix.validate]` overrides both, and a repo of any
+                 other type escalates.
   assess         headless claude with Read, Grep and Glob only returns strict JSON;
                  `mechanical` and `agrees` must be literally true and `confidence` at
                  least `min_confidence` (`parse_assessment`, `decide`).
@@ -34,7 +38,11 @@ Every step's outcome is appended to the job's `steps`, so a stop says where it w
                  named, changes at most `max_lines` lines, and isn't empty
                  (`scope_problem`). Checked again after validation, since a formatter
                  in the validate command can touch more files.
-  validate       the repo's command, in the worktree, with a timeout.
+  validate       that plan, in the worktree, with a timeout. The Elm gate is npm ci,
+                 then one headless claude that runs the elm-validation agent and then
+                 the elm-conventions-review agent (passed with --agents, since a clone
+                 outside the workspace's tree doesn't load its project agents); a
+                 conventions must-fix escalates, since only you can waive one.
   -- a dry run stops here, before anything is committed --
   commit         one commit for the comment, `Address <reviewer>'s <kind>: <summary>`.
   merge          origin/<base> merged in when the branch is behind; a conflict aborts
@@ -54,11 +62,13 @@ before the commit, never notifies, and leaves the PR's color alone.
 
 Every local command (git, claude, the validate command) runs through `Tools.run`;
 every GitHub write and the push run through `Tools.remote`; fresh PR snapshots come
-from `Tools.fetch_pr`. Tests swap all three for fakes.
+from `Tools.fetch_pr`. Tests swap all three for fakes. Every claude run uses
+--permission-mode dontAsk and --strict-mcp-config (no MCP servers load).
 """
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -128,6 +138,44 @@ Output ONLY a JSON object, no prose, no code fences:
 {{"mechanical": true | false, "agrees": true | false, "confidence": 0.0,
   "files": ["..."], "plan": "...", "reason": "..."}}
 """
+
+ELM_GATE_PROMPT = """This folder ({wt}) is a clone of the {repo} repo. Its staged, uncommitted
+change fixes a reviewer's comment on {pr_url}. Run the gate this workspace requires
+before any `.elm` commit, on this folder:
+
+1. Launch the `elm-validation` agent on {wt}. Tell it: no test-count baseline is
+   supplied; don't record the commit-gate mark (don't run elm-commit-gate.py); run
+   Playwright only with CI=true, never a headed browser, and report any spec that
+   needs a real login as skipped.
+2. Only if it passes, launch the `elm-conventions-review` agent on {wt} in commit mode.
+   Tell it not to record the commit-gate mark. No finding is waived.
+
+Don't edit files yourself, and don't commit, push or post anything.
+
+Then output ONLY a JSON object, no prose, no code fences:
+{{"validation": "pass" | "fail", "conventions": "pass" | "fail" | "not_run",
+  "must_fix": ["<path:line — rule — what to change>"],
+  "summary": "<one line per gate: hooks, format, build, elm-review, tests with the count, playwright, conventions>",
+  "failure": "<when something failed: the failing gate's error, quoted>"}}
+"""
+
+# What the Elm gate's session may run. The agents' own steps are these npm scripts and
+# read-only git and shell commands; nothing that commits, pushes or posts.
+ELM_GATE_BASH = [
+    "Bash(npm run format:elm)", "Bash(npm run build:elm)", "Bash(npm run elm-review:dry)",
+    "Bash(npm run test:elm)", "Bash(npm run pwt:*)", "Bash(CI=true npm run pwt:*)",
+    "Bash(npx husky)", "Bash(git diff:*)", "Bash(git ls-files:*)", "Bash(git status:*)",
+    "Bash(git log:*)", "Bash(git show:*)", "Bash(lsof:*)", "Bash(grep:*)", "Bash(sort:*)",
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+    "Bash([ -d .husky/_ ]:*)", "Bash(test -d:*)",
+]
+NEVER_BASH = ["Bash(git push:*)", "Bash(git commit:*)", "Bash(git reset:*)",
+              "Bash(git checkout:*)", "Bash(git merge:*)", "Bash(git rebase:*)",
+              "Bash(git remote:*)", "Bash(git config:*)", "Bash(gh:*)", "Bash(curl:*)",
+              "Bash(python3 ~/.claude/hooks/elm-commit-gate.py:*)"]
+# The clone's push URL while anything but the push step runs, so no other step can
+# push even by accident.
+PUSH_GUARD = "no-push-outside-the-autofix-push-step"
 
 RESOLVE_QUERY = ("mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) "
                  "{ thread { isResolved } } }")
@@ -320,8 +368,6 @@ def preconditions(job: dict, snap: dict | None, jobs: list[dict], cfg: dict,
         return "escalate", "couldn't tell the PR's branch or base"
     if branch == base or branch in PROTECTED:
         return "escalate", f"the PR's branch is {branch}, which is never pushed to"
-    if not (cfg["autofix"].get("validate") or {}).get(job["pr"]["repo"]):
-        return "escalate", f"{job['pr']['repo']} has no [autofix.validate] command"
     if any(j["id"] != job["id"] and _same_pr(j, job["pr"]["id"]) and j.get("status") == "running"
            and alive(j.get("pid")) for j in jobs):
         return "escalate", "another auto-fix is running on this PR"
@@ -372,6 +418,23 @@ def parse_edit(text: str) -> dict:
     return {"changed": data.get("changed") is True,
             "summary": " ".join(str(data.get("summary") or "").split()),
             "reason": str(data.get("reason") or "").strip()}
+
+
+def parse_elm_gate(text: str) -> dict:
+    """The Elm gate session's JSON. `validation` and `conventions` pass only when the
+    session said literally "pass"."""
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("no JSON object in the gate's result")
+    data = json.loads(text[start:end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("the gate's result isn't a JSON object")
+    return {"validation": "pass" if data.get("validation") == "pass" else "fail",
+            "conventions": data.get("conventions") if data.get("conventions") in
+            ("pass", "fail", "not_run") else "fail",
+            "must_fix": [str(m) for m in data.get("must_fix") or [] if str(m).strip()],
+            "summary": str(data.get("summary") or "").strip(),
+            "failure": str(data.get("failure") or "").strip()}
 
 
 def safe_files(files: list[str]) -> list[str]:
@@ -460,6 +523,105 @@ def fill_template(template: str, values: dict[str, str]) -> str:
     return template
 
 
+# --- how a repo is validated -------------------------------------------------------------
+
+
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def _has_tests(wt: Path) -> bool:
+    """Unit test sources: test/ (Play layout) or src/test in the root or a subproject."""
+    return ((wt / "test").is_dir() or (wt / "src" / "test").is_dir()
+            or any(p.is_dir() for p in wt.glob("*/src/test")))
+
+
+def sbt_tasks(wt: Path) -> tuple[list[str], list[str]]:
+    """(sbt tasks, why each was chosen) for an sbt build, from the repo's own files, run
+    without live services. compile and Test/compile always (unused-symbol warnings are
+    fatal there in some repos); it:compile when the build has an `it` config;
+    scalafixAll --check / scalafmtCheckAll only when both the plugin and its config file
+    exist; test when there are unit test sources; it:test only when the integration
+    tests use embedded Mongo (flapdoodle), never Testcontainers or a live database. Pure
+    apart from reading files."""
+    build, plugins = _read(wt / "build.sbt"), _read(wt / "project" / "plugins.sbt")
+    project = build + "".join(_read(p) for p in (wt / "project").glob("*.scala"))
+    tasks, why = ["compile", "Test/compile"], ["build.sbt"]
+    has_it = 'config("it")' in build or "IntegrationTest" in build or (wt / "it").is_dir()
+    if has_it:
+        tasks.append("it:compile")
+        why.append("an `it` config")
+    if "sbt-scalafix" in plugins and (wt / ".scalafix.conf").exists():
+        tasks.append('"scalafixAll --check"')
+        why.append("sbt-scalafix + .scalafix.conf")
+    if "sbt-scalafmt" in plugins and (wt / ".scalafmt.conf").exists():
+        tasks.append("scalafmtCheckAll")
+        why.append("sbt-scalafmt + .scalafmt.conf")
+    if _has_tests(wt):
+        tasks.append("test")
+        why.append("unit test sources")
+    if has_it and "flapdoodle" in project:
+        it_src = "".join(_read(p) for p in (wt / "it").rglob("*.scala")) if (wt / "it").is_dir() else ""
+        if "testcontainers" not in it_src.lower():
+            tasks.append("it:test")
+            why.append("integration tests on embedded Mongo")
+    return tasks, why
+
+
+def plan_validation(wt: Path, repo: str, cfg: dict) -> dict | None:
+    """How to validate a fix in the clone `wt`: {kind, command?, source}. The
+    `[autofix.validate]` override wins; an Elm repo (elm.json and package.json) runs the
+    Elm gate (`Fix._validate_elm`); an sbt build runs `sbt_tasks`. None for a repo of
+    any other type, which escalates."""
+    override = (cfg["autofix"].get("validate") or {}).get(repo)
+    if override:
+        return {"kind": "command", "command": override, "source": "[autofix.validate]"}
+    if (wt / "elm.json").exists() and (wt / "package.json").exists():
+        return {"kind": "elm", "source": "elm.json",
+                "agents": list(cfg["autofix"]["elm_agents"])}
+    if (wt / "build.sbt").exists():
+        tasks, why = sbt_tasks(wt)
+        return {"kind": "command", "command": "sbt -batch " + " ".join(tasks),
+                "source": "; ".join(why)}
+    return None
+
+
+def describe_validation(v: dict) -> str:
+    if v["kind"] == "elm":
+        return f"the Elm gate: npm ci, then the {' and '.join(v['agents'])} agents"
+    return f"`{v['command']}` (from {v['source']})"
+
+
+def agent_definitions(names: list[str], cfg: dict) -> dict:
+    """`claude --agents` JSON for the named agents, read from the workspace's
+    .claude/agents/ or ~/.claude/agents/. A headless run in a clone outside the
+    workspace's tree doesn't load the workspace's project agents on its own. Raises
+    ValueError for an agent that isn't found."""
+    out = {}
+    for name in names:
+        path = next((p for p in (settings.workspace(cfg) / ".claude" / "agents" / f"{name}.md",
+                                 Path("~/.claude/agents").expanduser() / f"{name}.md")
+                     if p.exists()), None)
+        if path is None:
+            raise ValueError(f"no {name} agent in .claude/agents")
+        text = path.read_text()
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            raise ValueError(f"{path} has no frontmatter")
+        meta = {}
+        for line in parts[1].strip().splitlines():
+            k, _, v = line.partition(":")
+            meta[k.strip()] = v.strip()
+        spec = {"description": meta.get("description") or name, "prompt": parts[2].strip()}
+        if meta.get("tools"):
+            spec["tools"] = [t.strip() for t in meta["tools"].split(",") if t.strip()]
+        out[meta.get("name") or name] = spec
+    return out
+
+
 # --- impure helpers ------------------------------------------------------------------------
 
 
@@ -544,12 +706,17 @@ def _last_line(text: str) -> str:
 
 class Fix:
     """One run of one job. `dry_run` stops before the commit; `persist` False (the
-    autofix-run --dry-run command) writes no job file and sends no notification."""
+    autofix-run --dry-run command) writes no job file and sends no notification.
+    `probe` (that command too) runs past failed preconditions, reporting where a live
+    run would stop, and works at the comment's own commit when the PR moved after it,
+    so a fix can be tried on a comment that was answered long ago."""
 
     def __init__(self, job: dict, cfg: dict, tools: Tools | None = None, *,
-                 dry_run: bool, persist: bool = True, out: Callable[[str], None] | None = None):
+                 dry_run: bool, persist: bool = True, out: Callable[[str], None] | None = None,
+                 probe: bool = False):
         self.job, self.cfg, self.tools = job, cfg, tools or Tools()
         self.dry_run, self.persist, self.out = dry_run, persist, out
+        self.probe = probe and dry_run
         self.pr = job["pr"]
         self.org = cfg["org"]
         self.wt = worktree_path(self.pr, cfg)
@@ -583,10 +750,10 @@ class Fix:
         return proc
 
     def claude(self, step: str, prompt: str, allowed: list[str], denied: list[str],
-               timeout: int) -> str:
+               timeout: int, extra: list[str] = ()) -> str:
         model = self.cfg["autofix"].get("model") or self.cfg["models"]["followup"]
         argv = ["claude", "-p", "--model", model, "--output-format", "json",
-                "--permission-mode", "dontAsk", "--strict-mcp-config",
+                "--permission-mode", "dontAsk", "--strict-mcp-config", *extra,
                 "--allowedTools", *allowed, "--disallowedTools", *denied]
         try:
             proc = self.tools.run(argv, input=prompt, capture_output=True, text=True,
@@ -599,6 +766,10 @@ class Fix:
             envelope = {}
         self.cost += float(envelope.get("total_cost_usd") or 0)
         self.job["cost_usd"] = round(self.cost, 4)
+        denied = [f"{d.get('tool_name')}: {json.dumps(d.get('tool_input'))[:200]}"
+                  for d in envelope.get("permission_denials") or [] if isinstance(d, dict)]
+        if denied:
+            self.job.setdefault("denials", {})[step] = denied
         if envelope.get("is_error") or not envelope.get("result"):
             self.escalate(step, "Claude's run failed",
                           _tail(str(envelope.get("result") or proc.stderr or proc.stdout)))
@@ -644,21 +815,37 @@ class Fix:
         job, cfg, af = self.job, self.cfg, self.cfg["autofix"]
         snap = self.tools.fetch_pr(self.pr, cfg)
         action, why = preconditions(job, snap, self.tools.jobs(), cfg, self.tools.alive)
-        if action == "clear":
-            raise Stop("cleared", "preconditions", why)
-        if action == "escalate":
+        thread = next((t for t in (snap or {}).get("threads") or []
+                       if t["id"] == job["thread_id"] and t["comments"]), None)
+        if action != "go" and (not self.probe or thread is None):
+            if action == "clear":
+                raise Stop("cleared", "preconditions", why)
             self.escalate("preconditions", why)
-        thread = next(t for t in snap["threads"] if t["id"] == job["thread_id"])
         job["body"] = thread["comments"][0].get("body") or job.get("body") or ""
         self.branch, self.base = snap["head_ref"], snap["base_ref"]
         unpushed = unpushed_checkouts(self.pr["repo"], self.branch, cfg, self.tools.run)
-        if unpushed:
+        if unpushed and not self.probe:
             self.escalate("preconditions", f"you have unpushed commits on {self.branch}",
                           "; ".join(unpushed))
-        self.step("preconditions", True)
+        if self.probe and (action != "go" or unpushed):
+            live = why or f"you have unpushed commits on {self.branch}: {'; '.join(unpushed)}"
+            self.step("preconditions", False, f"a live run would stop here ({live}); "
+                                              "the dry run goes on")
+        else:
+            self.step("preconditions", True)
 
-        self.start = self._prepare_worktree(snap["head"])
-        self.step("worktree", True, f"{self.wt} at {self.start[:12]}")
+        target = None
+        if self.probe and job.get("comment_commit") and job["comment_commit"] != snap["head"]:
+            target = job["comment_commit"]
+        self.start = self._prepare_worktree(snap["head"], target)
+        self.step("worktree", True, f"{self.wt} at {self.start[:12]}"
+                  + (" (the comment's commit, since the PR moved after it)" if target else ""))
+
+        self.validation = plan_validation(self.wt, self.pr["repo"], cfg)
+        if self.validation is None:
+            self.escalate("validate-plan", f"can't tell how to validate {self.pr['repo']}: "
+                          "no elm.json or build.sbt, and no [autofix.validate] override")
+        self.step("validate-plan", True, describe_validation(self.validation))
 
         a = self._assess(thread)
         job["assessment"] = a
@@ -694,7 +881,10 @@ class Fix:
         job["rerequested"] = self._rerequest()
         self._finish_done()
 
-    def _prepare_worktree(self, head: str) -> str:
+    def _prepare_worktree(self, head: str, target: str | None = None) -> str:
+        """Check out the PR's branch at the remote head, or (a probe) at `target`, the
+        comment's commit, reached through the PR's pull ref so a deleted branch still
+        works. The clone's push URL is the guard from here until the push step."""
         clone = settings.path_of(self.cfg["repos_root"]) / self.pr["repo"]
         if not (self.wt / ".git").exists():
             remove_worktree(self.pr, self.cfg)
@@ -707,18 +897,33 @@ class Fix:
             if (clone / ".git").is_dir():
                 argv += ["--reference-if-able", str(clone)]
             self.git(*argv, url, str(self.wt), cwd=self.wt.parent, timeout=1800)
+        self.git("config", "remote.origin.pushurl", PUSH_GUARD)
         b, base = self.branch, self.base
-        self.git("fetch", "-q", "origin", f"+refs/heads/{b}:refs/remotes/origin/{b}",
-                 f"+refs/heads/{base}:refs/remotes/origin/{base}", timeout=900)
-        self.git("checkout", "-q", "-f", "-B", b, f"refs/remotes/origin/{b}")
+        base_ref = f"+refs/heads/{base}:refs/remotes/origin/{base}"
+        if self.probe:
+            pull = f"refs/remotes/origin/pull-{self.pr['number']}"
+            self.git("fetch", "-q", "origin", f"+refs/pull/{self.pr['number']}/head:{pull}",
+                     base_ref, timeout=900)
+            if target and self.git("cat-file", "-e", f"{target}^{{commit}}",
+                                   check=False).returncode != 0:
+                self.git("fetch", "-q", "origin", target, timeout=900)
+            self.git("checkout", "-q", "-f", "-B", b, target or pull)
+        else:
+            self.git("fetch", "-q", "origin", f"+refs/heads/{b}:refs/remotes/origin/{b}",
+                     base_ref, timeout=900)
+            self.git("checkout", "-q", "-f", "-B", b, f"refs/remotes/origin/{b}")
         self.git("clean", "-q", "-fd")
         start = self.git("rev-parse", "HEAD").stdout.strip()
-        if start != head:
+        if start != (target or head):
             self.escalate("worktree", "the PR moved since the comment",
                           f"GitHub says {head[:12]}, the remote branch is {start[:12]}")
         return start
 
     def _thread_text(self, thread: dict) -> str:
+        """The thread's later human comments. A probe shows none: it replays the moment
+        the comment arrived, before anyone answered it."""
+        if self.probe:
+            return ""
         rest = [c for c in thread["comments"][1:] if not c["is_bot"]]
         if not rest:
             return ""
@@ -781,19 +986,73 @@ class Fix:
         self.step(step, True, ", ".join(f"{p} ({n})" for p, n in sorted(changed.items())))
 
     def _validate(self, step: str) -> None:
-        cmd = self.cfg["autofix"]["validate"][self.pr["repo"]]
-        timeout = int(self.cfg["autofix"]["validate_timeout"])
+        started = time.time()
+        if self.validation["kind"] == "elm":
+            detail = self._validate_elm(step)
+        else:
+            detail = self._validate_command(step, self.validation["command"])
+        took = int(time.time() - started)
+        self.job.setdefault("validate_seconds", {})[step] = took
+        self.step(step, True, f"{detail} ({took}s)")
+
+    def _sh(self, step: str, cmd: str, timeout: int) -> subprocess.CompletedProcess:
         try:
-            proc = self.tools.run(["/bin/sh", "-c", cmd], cwd=str(self.wt), capture_output=True,
+            return self.tools.run(["/bin/sh", "-c", cmd], cwd=str(self.wt), capture_output=True,
                                   text=True, timeout=timeout, env=self.env)
         except subprocess.TimeoutExpired:
-            self.escalate(step, f"validation timed out after {timeout}s")
+            self.escalate(step, f"`{cmd}` timed out after {timeout}s")
+
+    def _validate_command(self, step: str, cmd: str) -> str:
+        proc = self._sh(step, cmd, int(self.cfg["autofix"]["validate_timeout"]))
         output = (proc.stdout or "") + (proc.stderr or "")
+        self.job["validate_tail"] = _tail(output)
         if proc.returncode != 0:
-            self.job["validate_tail"] = _tail(output)
             self.escalate(step, f"validation failed (exit {proc.returncode}): {_last_line(output)}",
                           _tail(output))
-        self.step(step, True, cmd)
+        return f"`{cmd}` passed"
+
+    def _validate_elm(self, step: str) -> str:
+        """npm ci when the clone has no node_modules, then one headless session that runs
+        the elm-validation agent and, when it passes, the elm-conventions-review agent.
+        A failing gate or any conventions must-fix escalates; only Josh can waive one."""
+        timeout = int(self.cfg["autofix"]["validate_timeout"])
+        if not (self.wt / "node_modules").is_dir():
+            proc = self._sh(step, "npm ci --no-audit --no-fund", timeout)
+            if proc.returncode != 0:
+                self.escalate(step, "npm ci failed", _tail(proc.stdout + proc.stderr))
+        try:
+            agents = agent_definitions(self.validation["agents"], self.cfg)
+        except (OSError, ValueError) as exc:
+            self.escalate(step, f"can't load the Elm gate's agents: {exc}")
+        wt = str(self.wt.resolve())
+        prompt = ELM_GATE_PROMPT.format(wt=wt, repo=self.pr["repo"], pr_url=self.pr["url"])
+        with self._elm_lock():
+            text = self.claude(step, prompt,
+                               ["Agent", "Read", "Grep", "Glob", f"Edit(/{wt}/**)",
+                                f"Write(/{wt}/**)", *ELM_GATE_BASH],
+                               [*NEVER_BASH, "NotebookEdit", "WebFetch", "WebSearch"],
+                               timeout, extra=["--agents", json.dumps(agents)])
+        try:
+            gate = parse_elm_gate(text)
+        except ValueError as exc:
+            self.escalate(step, f"couldn't read the Elm gate's result: {exc}", _tail(text))
+        self.job["elm_gate"] = gate
+        if gate["validation"] != "pass":
+            self.escalate(step, f"the Elm gate failed: {gate['failure'] or gate['summary']}",
+                          gate["summary"])
+        if gate["conventions"] != "pass":
+            self.escalate(step, f"the conventions review found {len(gate['must_fix']) or 'a'} "
+                          f"must-fix: {(gate['must_fix'] or [gate['failure']])[0]}",
+                          "\n".join(gate["must_fix"]))
+        return f"Elm gate passed: {gate['summary']}"
+
+    @contextlib.contextmanager
+    def _elm_lock(self):
+        """One Elm gate at a time across PRs: its Playwright step serves on :3000."""
+        AUTOFIX_DIR.mkdir(parents=True, exist_ok=True)
+        with (AUTOFIX_DIR / "elm-gate.lock").open("w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            yield
 
     def _merge_base(self) -> bool:
         base = self.base
@@ -819,8 +1078,12 @@ class Fix:
         remote = self.git("ls-remote", "origin", f"refs/heads/{self.branch}").stdout.split()
         if not remote or remote[0] != self.start:
             self.escalate("push", "the branch moved on GitHub during the fix")
-        proc = self.tools.remote(argv, cwd=str(self.wt), capture_output=True, text=True,
-                                 timeout=600, env=self.env)
+        self.git("config", "--unset", "remote.origin.pushurl", check=False)
+        try:
+            proc = self.tools.remote(argv, cwd=str(self.wt), capture_output=True, text=True,
+                                     timeout=600, env=self.env)
+        finally:
+            self.git("config", "remote.origin.pushurl", PUSH_GUARD, check=False)
         if proc.returncode != 0:
             self.escalate("push", f"the push failed: {_last_line(proc.stderr or proc.stdout)}")
         pushed = self.git("rev-parse", "HEAD").stdout.strip()
@@ -1024,11 +1287,21 @@ def run_command(target: str, cfg: dict, dry_run: bool, tools: Tools | None = Non
     job["steps"] = []
     out(f"Dry run of the auto-fix for {job['reviewer']}'s {job['kind']} on "
         f"{job['pr']['repo']}#{job['pr']['number']} ({job.get('comment_url') or job['thread_id']})")
-    fix = Fix(job, cfg, tools, dry_run=True, persist=False, out=out)
+    fix = Fix(job, cfg, tools, dry_run=True, persist=False, out=out, probe=True)
     rc = fix.run()
     out(f"\nStopped: {job['status']}: {job.get('reason') or ''}")
     if job.get("detail"):
         out(job["detail"])
+    if job.get("assessment"):
+        out("\nAssessment:\n" + json.dumps(job["assessment"], indent=2))
+    if job.get("elm_gate"):
+        out("\nElm gate:\n" + json.dumps(job["elm_gate"], indent=2))
+    if job.get("validate_tail"):
+        out("\nValidation output (tail):\n" + job["validate_tail"])
+    for step, denied in (job.get("denials") or {}).items():
+        out(f"\nTool calls refused during {step}:\n" + "\n".join(f"- {d}" for d in denied))
+    if job.get("changed") and not job.get("would_commit") and (fix.wt / ".git").exists():
+        out("\nDiff left in the clone:\n" + fix.git("diff", "HEAD", check=False).stdout[:DIFF_LIMIT])
     if job.get("would_commit"):
         out("\nWould commit:\n" + job["would_commit"])
         out("Diff:\n" + (job.get("diff") or ""))

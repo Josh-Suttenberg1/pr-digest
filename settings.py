@@ -96,8 +96,11 @@ DEFAULTS: dict = {
         "validate_timeout": 1800,
         # One clone per PR, as <worktrees_dir>/<repo>-<number>.
         "worktrees_dir": str(OUTPUT_DIR / "worktrees"),
-        # repo -> the command that validates a fix, run in its worktree. A repo
-        # missing here never gets an automatic push.
+        # The agents an Elm repo's fix runs, in order, from <workspace>/.claude/agents/ or
+        # ~/.claude/agents/ (watcher/autofix.py plan_validation).
+        "elm_agents": ["elm-validation", "elm-conventions-review"],
+        # repo -> a command that validates a fix, run in its worktree. Only an override:
+        # each repo's validation is worked out from its files (elm.json, build.sbt).
         "validate": {},
     },
     # triage/priority.py: a review you owe turns yellow once it has waited more than
