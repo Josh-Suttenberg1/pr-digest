@@ -52,6 +52,11 @@ model = ""                       # "" uses [models] followup
 # Overrides only: repo = "command run in the fix's worktree".
 # processservice = "sbt -batch compile Test/compile test"
 
+[triage]
+# Your pod's GitHub logins. Their review requests are red from the start and stay red
+# until you've reviewed, even once others approve.
+pod = []
+
 [jira]
 # PRs for sub-tasks of one Jira ticket show as one group in the menu, titled with the
 # parent ticket. "" turns the lookup off (only PRs sharing a ticket key group).

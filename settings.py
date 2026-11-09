@@ -53,7 +53,8 @@ DEFAULTS: dict = {
         "reports_dir": str(OUTPUT_DIR / "followups"),
     },
     "triage": {
-        # Authors whose PRs rank higher in the reviews-you-owe list.
+        # Your pod: their review requests are red from the start and stay red until
+        # you've reviewed (triage/priority.py owed), and rank higher in the list.
         "pod": [],
         # Check names (case-insensitive substrings) whose failure doesn't park a PR.
         "ci_ignored": [],

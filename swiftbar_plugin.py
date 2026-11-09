@@ -300,11 +300,13 @@ def mine_activity(row: dict) -> str:
 
 
 def _priority_settings() -> dict:
+    """[priority], plus `pod` from [triage]: whose PRs are red reviews from the start."""
     try:
         import settings
-        return settings.load()["priority"]
+        cfg = settings.load()
+        return {**cfg["priority"], "pod": list(cfg["triage"].get("pod") or [])}
     except Exception:  # noqa: BLE001
-        return {"stale_after_days": 2, "max_engaged_for_stale": 1}
+        return {"stale_after_days": 2, "max_engaged_for_stale": 1, "pod": []}
 
 
 def _group_key(e: dict, groups: dict[str, dict]) -> str:
@@ -384,7 +386,7 @@ def build_sections(data: dict, followup_jobs: list[dict],
         data.get("mine") or [], reviews, followup_jobs, nick=nick, now=now,
         required=required, stale_after_days=prio["stale_after_days"],
         max_engaged=prio["max_engaged_for_stale"], dismissed=dismissed or {},
-        autofix=autofix_jobs or [])
+        autofix=autofix_jobs or [], pod=frozenset(prio.get("pod") or ()))
 
     ranked = {st.get("pr_url"): i for i, st in enumerate(reviews.get("needs_you") or [])}
     mine_rows = [e for e in entries if e["section"] == priority.MINE]

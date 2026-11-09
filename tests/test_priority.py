@@ -144,6 +144,35 @@ class OwedRulesTest(unittest.TestCase):
                reason="you requested changes; the author has pushed since")
         self.assertEqual(classify({"needs_you": [s]})[url(1)]["section"], P.OTHER)
 
+    def test_a_pod_members_request_is_red_from_the_start(self):
+        s = st(1, author="m0n01d", waiting_since="2026-11-04T17:00:00Z")
+        e = P.classify([], {"needs_you": [s], "author": [], "well_approved": [], "done": [],
+                            "unreadable": []}, [], nick=NICK, now=NOW, pod={"m0n01d"})[0]
+        self.assertEqual((e["section"], e["color"]), (P.OWED, P.RED))
+        self.assertEqual(e["reason"], "Review it · 0 of 2 approvals · today")
+        self.assertTrue(e["why"].startswith("Why it's red: m0n01d is in your pod, so you "
+                                            "review it first"))
+
+    def test_a_pod_members_pr_stays_owed_once_others_approve_unless_ci_fails(self):
+        def run(s, bucket):
+            full = {"needs_you": [], "author": [], "well_approved": [], "done": [],
+                    "unreadable": []}
+            full[bucket] = [s]
+            return P.classify([], full, [], nick=NICK, now=NOW, pod={"m0n01d"})[0]
+        approved = st(1, author="m0n01d", bucket="well_approved", approvals=["a", "b"])
+        self.assertEqual(run(approved, "well_approved")["color"], P.RED)
+        parked = st(2, author="m0n01d", tier=P.PARKED_TIER,
+                    tags=["2 approvals already; needs rev to re-review"])
+        self.assertEqual(run(parked, "needs_you")["color"], P.RED)
+        failing = st(3, author="m0n01d", tier=P.PARKED_TIER, tags=["CI failing: build"])
+        self.assertEqual(run(failing, "needs_you")["section"], P.OTHER)
+        # the same PR from someone outside the pod stays where it was
+        self.assertEqual(P.classify([], {"needs_you": [], "author": [], "done": [],
+                                         "unreadable": [],
+                                         "well_approved": [st(4, bucket="well_approved")]},
+                                    [], nick=NICK, now=NOW, pod={"m0n01d"})[0]["section"],
+                         P.OTHER)
+
     def test_parked_first_review_is_everything_else(self):
         s = st(1, tier=P.PARKED_TIER, tags=["CI failing: build"])
         e = classify({"needs_you": [s]})[url(1)]

@@ -51,6 +51,9 @@ Every PR lands in exactly one section, with at most one color:
              approvals, and at most `max_engaged` people other than the author and bots
              have approved or commented.
     green    everything else. Shown, but not counted in the menu-bar title.
+    red      instead, from the start, when the author is in `[triage] pod`: a pod
+             member's PR is yours to review first. It stays red once others approve it;
+             only failing CI parks it.
 
   Everything else (`OTHER`): Waiting on others, with no dot, when you left comments or
   a change request and the author hasn't responded to them; otherwise Nothing needed,
@@ -524,19 +527,21 @@ def followup(jobs: list[dict], nick: dict[str, str], *, author: str = "",
 
 def owed(st: dict, nick: dict[str, str], now: datetime, *, required: int = 2,
          stale_after_days: float = 2, max_engaged: int = 1,
-         dismissed_at: str | None = None) -> dict:
-    """A PR waiting on your first review (or a fresh one after yours was dismissed)."""
+         dismissed_at: str | None = None, pod: bool = False) -> dict:
+    """A PR waiting on your first review (or a fresh one after yours was dismissed).
+    `pod` (the author is in `[triage] pod`) makes it red from the start: a pod member's
+    PR is yours to review first, however long it has waited."""
     since = st.get("waiting_since") or st.get("created_at") or ""
     engaged = list(st.get("engaged") or [])
     n = len(st.get("approvals") or [])
     waited = days_waiting(since, now)
     stale = waited > stale_after_days and n < required and len(engaged) <= max_engaged
-    color = YELLOW if stale else GREEN
+    color = RED if pod else YELLOW if stale else GREEN
     approvals = "no approvals" if not n else _plural(n, "approval")
     dismissed_review = (st.get("mine") or [None])[0] == "DISMISSED"
 
     reason = _with_age(f"Review it · {tally(n, required)}", since, now)
-    if not stale and len(engaged) > max_engaged:
+    if color == GREEN and len(engaged) > max_engaged:
         reason += f" · {names(engaged, nick)} are on it"
     if dismissed_review:
         reason = "Your review was dismissed · " + reason
@@ -548,8 +553,10 @@ def owed(st: dict, nick: dict[str, str], now: datetime, *, required: int = 2,
     else:
         people = f"{names(engaged, nick)} have reviewed or commented"
     asked = (f"{_plural(int(waited), 'day')} ago" if waited >= 2 else ago(since, now))
-    why = (f"Why it's {'yellow' if stale else 'green'}: requested {asked} · "
-           f"{approvals} · {people}")
+    label = {RED: "red", YELLOW: "yellow", GREEN: "green"}[color]
+    lead = (f"{who(st.get('author') or '', nick)} is in your pod, so you review it first · "
+            if pod else "")
+    why = f"Why it's {label}: {lead}requested {asked} · {approvals} · {people}"
     dismissed = bool(dismissed_at and since and since <= dismissed_at)
     if dismissed:
         return {"section": OWED, "color": None, "reason": f"Dismissed · {reason}",
@@ -719,13 +726,27 @@ def done_for_you(autofix_jobs: list[dict], followup_jobs: list[dict], nick: dict
 # --- the whole menu ------------------------------------------------------------------
 
 
+def _owed_review(st: dict) -> bool:
+    """A first review you owe: the triage says it's on you and it isn't parked."""
+    return st.get("bucket") == "needs_you" and st.get("tier") != PARKED_TIER
+
+
+def _owed_pod_review(st: dict) -> bool:
+    """A pod member's PR stays a review you owe even once others have approved it
+    (parked on approvals, or in the well-approved bucket). Failing CI still parks it."""
+    if any(t.startswith("CI failing") for t in st.get("tags") or []):
+        return False
+    return st.get("bucket") in ("needs_you", "well_approved")
+
+
 def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[dict], *,
              nick: dict[str, str], now: datetime, required: int = 2,
              stale_after_days: float = 2, max_engaged: int = 1,
              dismissed: dict[str, str] | None = None,
-             autofix: list[dict] | None = None) -> list[dict]:
+             autofix: list[dict] | None = None, pod=frozenset()) -> list[dict]:
     """One entry per PR: {url, title, section, color, reason, why, waiting_since,
-    activity_at, dismissed, row | st, jobs}. `reviews` is review_triage's buckets
+    activity_at, dismissed, row | st, jobs}. `pod` holds the logins whose PRs are
+    red reviews from the start (`owed`). `reviews` is review_triage's buckets
     (needs_you in ranked order); `jobs` every follow-up job; `dismissed` url → the
     activity time it was dismissed at; `autofix` every auto-fix job, which only your
     PRs carry (an entry's `autofix`)."""
@@ -764,11 +785,12 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
             fresh = not (st.get("mine") or st.get("commented")) or mine_state == "DISMISSED"
             if f:
                 out.append({**base, **f, "group": NEEDS})
-            elif (fresh and st.get("bucket") == "needs_you"
-                  and st.get("tier") != PARKED_TIER):
+            elif fresh and (_owed_review(st) or (st.get("author") in pod
+                                                  and _owed_pod_review(st))):
                 out.append({**base, "jobs": [], "group": NEEDS, **owed(
                     st, nick, now, required=required, stale_after_days=stale_after_days,
-                    max_engaged=max_engaged, dismissed_at=dismissed.get(url))})
+                    max_engaged=max_engaged, dismissed_at=dismissed.get(url),
+                    pod=st.get("author") in pod)})
             else:
                 out.append(_not_on_you(base, st, now, required))
 
