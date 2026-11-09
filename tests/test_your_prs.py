@@ -195,7 +195,7 @@ class YourPrsSectionTest(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             menu.mine_rows(s["mine"], {}, 2)
-        top = [x.split(" | ")[0].strip("\u00a0") for x in out.getvalue().splitlines()
+        top = [x.split(" | ")[0].strip("─ ") for x in out.getvalue().splitlines()
                if not x.startswith("--")]
         heads = [x for x in top if x in P.MINE_GROUPS.values()]
         self.assertEqual(heads, ["Needs you", "Waiting on others", "Ready"])

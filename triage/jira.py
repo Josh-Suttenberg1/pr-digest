@@ -3,7 +3,8 @@ together.
 
 A sub-task groups under its parent; any other ticket (a story, a bug, an epic's child)
 groups under itself, so an epic never collects its children. `groups(keys, cfg)`
-returns {ticket key: {"key": group key, "summary": that ticket's summary}}. It looks
+returns {ticket key: {"key": group key, "summary": that ticket's summary, "type": its
+issue type}}. It looks
 each key up with the configured Jira CLI (`[jira] cli`, Atlassian's acli:
 `acli jira workitem view <key> --fields issuetype,parent,summary --json`) and caches
 the answer in state/jira.json for `[jira] cache_days`. A key the CLI can't read is
@@ -25,13 +26,16 @@ TIMEOUT = 20
 
 
 def group_of(view: dict) -> dict:
-    """{key, summary} of the ticket a `workitem view` result groups under. Pure."""
+    """{key, summary, type} of the ticket a `workitem view` result groups under, `type`
+    being its issue type in lower case ("story", "bug"). Pure."""
     fields = view.get("fields") or {}
     parent = fields.get("parent") or {}
     if (fields.get("issuetype") or {}).get("subtask") and parent.get("key"):
-        return {"key": parent["key"],
-                "summary": (parent.get("fields") or {}).get("summary") or ""}
-    return {"key": view.get("key") or "", "summary": fields.get("summary") or ""}
+        pf = parent.get("fields") or {}
+        return {"key": parent["key"], "summary": pf.get("summary") or "",
+                "type": ((pf.get("issuetype") or {}).get("name") or "").lower()}
+    return {"key": view.get("key") or "", "summary": fields.get("summary") or "",
+            "type": ((fields.get("issuetype") or {}).get("name") or "").lower()}
 
 
 def _view(cli: str, key: str) -> dict | None:
@@ -68,8 +72,10 @@ def groups(keys, cfg: dict, *, path: Path = CACHE, now: float | None = None,
     now = time.time() if now is None else now
     max_age = float(jira.get("cache_days", 7)) * 86400
     cache = _load(path)
+    # An entry without `type` predates it being recorded, so it's looked up again.
     fresh = {k: v for k, v in cache.items()
-             if isinstance(v, dict) and now - float(v.get("at") or 0) < max_age}
+             if isinstance(v, dict) and "type" in v
+             and now - float(v.get("at") or 0) < max_age}
     todo = sorted({k for k in keys if k} - set(fresh))
     if todo:
         with ThreadPoolExecutor(max_workers=WORKERS) as pool:
@@ -82,5 +88,5 @@ def groups(keys, cfg: dict, *, path: Path = CACHE, now: float | None = None,
             path.write_text(json.dumps(fresh, indent=2, sort_keys=True) + "\n")
         except OSError:
             pass
-    return {k: {"key": v["key"], "summary": v.get("summary") or ""}
+    return {k: {"key": v["key"], "summary": v.get("summary") or "", "type": v.get("type") or ""}
             for k, v in fresh.items() if k in set(keys) and v.get("key")}

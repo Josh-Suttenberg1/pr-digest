@@ -18,20 +18,22 @@ CFG = {"jira": {"cli": "acli", "cache_days": 7}}
 
 
 def view(key, *, subtask=False, parent=None, summary="s"):
-    fields = {"issuetype": {"subtask": subtask}, "summary": summary}
+    fields = {"issuetype": {"subtask": subtask, "name": "Sub-task" if subtask else "Story"},
+              "summary": summary}
     if parent:
-        fields["parent"] = {"key": parent, "fields": {"summary": f"parent {parent}"}}
+        fields["parent"] = {"key": parent, "fields": {"summary": f"parent {parent}",
+                                                      "issuetype": {"name": "Story"}}}
     return {"key": key, "fields": fields}
 
 
 class GroupOfTest(unittest.TestCase):
     def test_a_sub_task_groups_under_its_parent(self):
         self.assertEqual(jira.group_of(view("ABC-2", subtask=True, parent="ABC-1")),
-                         {"key": "ABC-1", "summary": "parent ABC-1"})
+                         {"key": "ABC-1", "summary": "parent ABC-1", "type": "story"})
 
     def test_anything_else_groups_under_itself_even_with_an_epic_parent(self):
         self.assertEqual(jira.group_of(view("ABC-5", parent="ABC-EPIC", summary="story")),
-                         {"key": "ABC-5", "summary": "story"})
+                         {"key": "ABC-5", "summary": "story", "type": "story"})
 
 
 class GroupsCacheTest(unittest.TestCase):
@@ -47,7 +49,8 @@ class GroupsCacheTest(unittest.TestCase):
 
     def test_lookups_are_cached_and_unreadable_keys_retried(self):
         out = jira.groups({"ABC-2", "ABC-9"}, CFG, path=self.path, now=1000, view=self.fake)
-        self.assertEqual(out, {"ABC-2": {"key": "ABC-1", "summary": "parent ABC-1"}})
+        self.assertEqual(out, {"ABC-2": {"key": "ABC-1", "summary": "parent ABC-1",
+                                         "type": "story"}})
         self.assertEqual(sorted(json.loads(self.path.read_text())), ["ABC-2"])
         self.asked.clear()
         jira.groups({"ABC-2", "ABC-9"}, CFG, path=self.path, now=2000, view=self.fake)
@@ -57,6 +60,11 @@ class GroupsCacheTest(unittest.TestCase):
         jira.groups({"ABC-2"}, CFG, path=self.path, now=0, view=self.fake)
         self.asked.clear()
         jira.groups({"ABC-2"}, CFG, path=self.path, now=8 * 86400, view=self.fake)
+        self.assertEqual(self.asked, ["ABC-2"])
+
+    def test_an_entry_from_before_types_were_recorded_is_looked_up_again(self):
+        self.path.write_text(json.dumps({"ABC-2": {"key": "ABC-1", "summary": "x", "at": 1000}}))
+        jira.groups({"ABC-2"}, CFG, path=self.path, now=2000, view=self.fake)
         self.assertEqual(self.asked, ["ABC-2"])
 
     def test_no_cli_means_no_lookups(self):
@@ -100,22 +108,27 @@ class GroupedTest(unittest.TestCase):
         [g] = menu.build_sections(data(rows, {}), [], now=NOW)["mine_view"]
         self.assertEqual((g["kind"], g["key"]), ("group", "ABC-4"))
 
-    def test_a_group_row_nests_each_child_with_its_own_submenu(self):
+    def test_a_story_is_a_header_row_with_its_prs_as_a_tree_under_it(self):
         rows = [mine_row(1, "[ABC-2] be part", repo="api"), mine_row(2, "[ABC-3] fe part")]
-        groups = {"ABC-2": {"key": "ABC-1", "summary": "the story"},
-                  "ABC-3": {"key": "ABC-1", "summary": "the story"}}
+        groups = {"ABC-2": {"key": "ABC-1", "summary": "the story", "type": "story"},
+                  "ABC-3": {"key": "ABC-1", "summary": "the story", "type": "story"}}
         s = menu.build_sections(data(rows, groups), [], now=NOW)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             menu.mine_rows(s["mine_view"], {}, 2)
         lines = [x.split(" | ")[0] for x in out.getvalue().splitlines()]
-        self.assertIn("ABC-1 · 2 PRs: 2 waiting on others · the story", lines)
-        kids = [x for x in lines if x.startswith("--ABC-")]
-        self.assertTrue(kids[0].startswith("--ABC-1 · the story"))
-        self.assertTrue(any(x.startswith("--ABC-2 (api) · ") for x in kids))
-        self.assertTrue(any(x.startswith("--ABC-3 (web) · ") for x in kids))
-        self.assertTrue(any(x.startswith("----") and "Open on GitHub" in x for x in lines))
-        self.assertEqual(menu._PREFIX, "")          # nesting is undone afterwards
+        top = [x for x in lines if not x.startswith("--")]
+        self.assertEqual(top[0], "── Waiting on others ──")
+        self.assertEqual(top[1], "📘 ABC-1 the story · story · 2 sub-tasks")
+        self.assertTrue(top[2].startswith(menu.TREE_INDENT + "├ ABC-2 api · "))
+        self.assertTrue(top[3].startswith(menu.TREE_INDENT + "└ ABC-3 web · "))
+        # each PR keeps its own submenu, right under its row
+        self.assertTrue(lines[lines.index(top[2]) + 1].startswith("--api#1 · "))
+
+    def test_one_ticket_across_repos_reads_as_prs_not_sub_tasks(self):
+        rows = [mine_row(1, "[ABC-4] api", repo="api"), mine_row(2, "[ABC-4] web")]
+        [g] = menu.build_sections(data(rows, {}), [], now=NOW)["mine_view"]
+        self.assertEqual(g["label"], "2 PRs")
 
 
 if __name__ == "__main__":

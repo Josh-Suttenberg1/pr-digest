@@ -110,13 +110,13 @@ class OwedRulesTest(unittest.TestCase):
     def test_new_request_is_green(self):
         e = classify({"needs_you": [st(1, waiting_since="2026-11-03T20:00:00Z")]})[url(1)]
         self.assertEqual((e["section"], e["color"]), (P.OWED, P.GREEN))
-        self.assertEqual(e["reason"], "Requested yesterday · 0 of 2 approvals")
+        self.assertEqual(e["reason"], "Review it · 0 of 2 approvals · 1d")
 
     def test_stalled_review_is_yellow(self):
         s = st(1, waiting_since="2026-11-01T12:00:00Z", engaged=["kylerscharpen"])
         e = classify({"needs_you": [s]})[url(1)]
         self.assertEqual(e["color"], P.YELLOW)
-        self.assertEqual(e["reason"], "Waiting 3 days · 0 of 2 approvals")
+        self.assertEqual(e["reason"], "Review it · 0 of 2 approvals · 3d")
         self.assertEqual(e["why"], "Why it's yellow: requested 3 days ago · no approvals · "
                                    "only Kyler has reviewed or commented")
 
@@ -124,7 +124,7 @@ class OwedRulesTest(unittest.TestCase):
         s = st(1, waiting_since="2026-11-01T12:00:00Z", engaged=["kylerscharpen", "plaxdan"])
         e = classify({"needs_you": [s]})[url(1)]
         self.assertEqual(e["color"], P.GREEN)
-        self.assertEqual(e["reason"], "Requested 3 days ago · 0 of 2 approvals · Kyler and Woods "
+        self.assertEqual(e["reason"], "Review it · 0 of 2 approvals · 3d · Kyler and Woods "
                                       "are on it")
 
     def test_two_days_exactly_is_not_yet_stale_and_enough_approvals_never_is(self):

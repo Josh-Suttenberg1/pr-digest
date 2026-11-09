@@ -57,3 +57,5 @@ model = ""                       # "" uses [models] followup
 # parent ticket. "" turns the lookup off (only PRs sharing a ticket key group).
 cli = "acli"
 cache_days = 7
+# A story row links to the ticket: browse_url + key. "" leaves it unlinked.
+browse_url = ""

@@ -535,13 +535,9 @@ def owed(st: dict, nick: dict[str, str], now: datetime, *, required: int = 2,
     approvals = "no approvals" if not n else _plural(n, "approval")
     dismissed_review = (st.get("mine") or [None])[0] == "DISMISSED"
 
-    if stale:
-        reason = f"Waiting {_plural(int(waited), 'day')} · {tally(n, required)}"
-    else:
-        reason = ("Requested " + (f"{_plural(int(waited), 'day')} ago" if waited >= 2
-                                   else ago(since, now)) + f" · {tally(n, required)}")
-        if len(engaged) > max_engaged:
-            reason += f" · {names(engaged, nick)} are on it"
+    reason = _with_age(f"Review it · {tally(n, required)}", since, now)
+    if not stale and len(engaged) > max_engaged:
+        reason += f" · {names(engaged, nick)} are on it"
     if dismissed_review:
         reason = "Your review was dismissed · " + reason
 

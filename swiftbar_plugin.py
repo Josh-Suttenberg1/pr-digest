@@ -51,7 +51,6 @@ current.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import re
@@ -317,8 +316,10 @@ def grouped(entries: list[dict], groups: dict[str, dict]) -> list[dict]:
     """`entries` (already in menu order) with every set of two or more PRs that share a
     group key (their ticket's Jira group, or the ticket itself) replaced by one group
     entry at the place of its first, most urgent, child: {"kind": "group", "key",
-    "summary", "children", "color" (the most severe child's), "group" (the first
-    child's sub-header), "url", "title", "waiting_since"}."""
+    "summary", "label" ("story · 2 sub-tasks", or "2 PRs" for one ticket across
+    repos), "children" (each with its `tree` marker, ├ or └), "color" (the most severe
+    child's), "group" (the first child's sub-header), "url", "title",
+    "waiting_since"}."""
     buckets: dict[str, list[dict]] = {}
     for e in entries:
         buckets.setdefault(_group_key(e, groups), []).append(e)
@@ -333,9 +334,15 @@ def grouped(entries: list[dict], groups: dict[str, dict]) -> list[dict]:
             out.append(e)
             continue
         first = priority.ticket(kids[0].get("title") or "", kids[0]["url"])
-        summary = (groups.get(first) or {}).get("summary") or _title(kids[0])
-        out.append({"kind": "group", "key": g, "summary": summary,
-                    "children": [{**k, "show_repo": True} for k in kids],
+        info = groups.get(first) or {}
+        summary = info.get("summary") or _title(kids[0])
+        # A parent of sub-tasks, or one ticket whose PRs span several repos.
+        parent = any(priority.ticket(k.get("title") or "", k["url"]) != g for k in kids)
+        label = (f"{info.get('type') or 'ticket'} · {len(kids)} sub-tasks" if parent
+                 else f"{len(kids)} PRs")
+        out.append({"kind": "group", "key": g, "summary": summary, "label": label,
+                    "children": [{**k, "tree": "└ " if i == len(kids) - 1 else "├ "}
+                                 for i, k in enumerate(kids)],
                     "color": max((k.get("color") for k in kids), key=priority.rank),
                     "group": kids[0].get("group"), "url": kids[0]["url"],
                     "title": f"{g} {summary}",
@@ -444,24 +451,7 @@ def truncate(text: str, limit: int = TITLE_MAX) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-# Prepended to every emitted line; `nested()` adds a level so a whole row, submenu and
-# all, sits inside the submenu of the row above it.
-_PREFIX = ""
-
-
-@contextlib.contextmanager
-def nested():
-    global _PREFIX
-    before = _PREFIX
-    _PREFIX += "--"
-    try:
-        yield
-    finally:
-        _PREFIX = before
-
-
 def emit(text: str = "", **params: str) -> None:
-    text = _PREFIX + text
     parts = []
     for key, value in params.items():
         value = str(value)
@@ -545,19 +535,29 @@ def review_status(key: str, head: str) -> dict:
 
 
 ROW_MAX = 100
-# Leading non-breaking spaces that indent a sub-header under its section name.
-SUBHEAD_INDENT = "\u00a0\u00a0\u00a0"
+# Indents a story's PRs under it. Blank Braille cells are printable characters, not
+# whitespace, so a leading run of them isn't trimmed away the way spaces are.
+TREE_INDENT = "\u2800\u2800"
+
+
+def subhead(name: str) -> None:
+    """A sub-header inside a section: '── Needs you ──'."""
+    emit(f"── {name} ──", color="#888888", size="12")
 
 
 def row_text(e: dict, limit: int = ROW_MAX) -> str:
     """'🔴 ABC-123 · Woods left 8 comments (3 suggestions, 5 nits) · Show the exact…':
     the ticket first so the row always says which PR it is, then what happened, then
-    as much of the title as fits."""
+    as much of the title as fits. A PR under a story starts with its tree marker and
+    names its repo: '⠀⠀├ 🟡 ABC-2 processservice · Review it · …'."""
     key = priority.ticket(e.get("title") or "", e["url"])
-    if e.get("show_repo"):
-        key += f" ({e['url'].rstrip('/').split('/')[-3]})"
+    tree = e.get("tree") or ""
+    if tree:
+        key += f" {e['url'].rstrip('/').split('/')[-3]}"
     d = priority.dot(e.get("color"))
     head = f"{d} {key}" if d else key
+    if tree:
+        head = TREE_INDENT + tree + head
     head += f" · {sanitize(e.get('reason') or '')}"
     title = sanitize(_title({"title": e.get("title") or ""}))
     if not title:
@@ -865,40 +865,31 @@ def mine_rows(entries: list[dict], nick: dict[str, str], required: int) -> None:
         if e.get("group") != group:
             group = e.get("group")
             if group in priority.MINE_GROUPS:
-                emit(SUBHEAD_INDENT + priority.MINE_GROUPS[group], color="#888888", size="12")
+                subhead(priority.MINE_GROUPS[group])
         if e.get("kind") == "group":
             group_block(e, lambda kid: mine_block(kid, nick, required))
         else:
             mine_block(e, nick, required)
 
 
-def _group_states(kids: list[dict]) -> str:
-    """'1 needs you, 1 waiting on others', by sub-header in menu order."""
-    order = list(priority.MINE_GROUPS)
-    counts: dict[str, int] = {}
-    for k in kids:
-        counts[k.get("group") or ""] = counts.get(k.get("group") or "", 0) + 1
-    return ", ".join(f"{n} {priority.MINE_GROUPS.get(g, 'other').lower()}"
-                     for g, n in sorted(counts.items(),
-                                        key=lambda x: order.index(x[0]) if x[0] in order
-                                        else len(order)))
-
-
 def group_block(e: dict, child) -> None:
-    """A Jira group: one row for the parent ticket with its most severe child's dot and
-    a count of its PRs by state, and a submenu with each child PR drawn by `child`,
-    nested one level down, so each keeps its own submenu."""
-    kids = e["children"]
-    d = priority.dot(e.get("color"))
-    head = f"{d} {e['key']}" if d else e["key"]
-    head += f" · {len(kids)} PRs: {_group_states(kids)}"
-    title = sanitize(e.get("summary") or "")
-    emit(f"{head} · {truncate(title, max(ROW_MAX - len(head) - 3, 16))}" if title else head)
-    if title:
-        emit(f"--{e['key']} · {truncate(title, 100)}", color="#888888")
-    with nested():
-        for kid in kids:
-            child(kid)
+    """A Jira story and its PRs, as a tree: a header row for the story (no dot, linked
+    to the ticket when `[jira] browse_url` is set), then each PR drawn by `child` as an
+    ordinary row with its tree marker, so each keeps its own dot and submenu."""
+    title = truncate(sanitize(e.get("summary") or ""), 70)
+    emit(f"📘 {e['key']} {title} · {e.get('label') or ''}".rstrip(" ·"),
+         href=_jira_url(e["key"]))
+    for kid in e["children"]:
+        child(kid)
+
+
+def _jira_url(key: str) -> str:
+    try:
+        import settings
+        base = settings.load()["jira"]["browse_url"]
+    except Exception:  # noqa: BLE001
+        return ""
+    return f"{base}{key}" if base else ""
 
 
 def mine_drafts_block(entries: list[dict]) -> None:
@@ -1104,11 +1095,11 @@ def others_rows(sections: dict, nick: dict[str, str]) -> None:
     needs = sections.get("others_needs_view", sections["others_needs"])
     waiting = sections.get("others_waiting_view", sections["others_waiting"])
     if needs:
-        emit(SUBHEAD_INDENT + groups[priority.NEEDS], color="#888888", size="12")
+        subhead(groups[priority.NEEDS])
         for e in needs:
             row(e)
     if waiting:
-        emit(SUBHEAD_INDENT + groups[priority.WAITING], color="#888888", size="12")
+        subhead(groups[priority.WAITING])
         for e in waiting:
             row(e)
     if not needs and not waiting:

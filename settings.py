@@ -120,6 +120,9 @@ DEFAULTS: dict = {
     "jira": {
         "cli": "acli",
         "cache_days": 7,
+        # Prefix that turns a ticket key into a link, e.g.
+        # "https://example.atlassian.net/browse/"; "" leaves story rows unlinked.
+        "browse_url": "",
     },
 }
 

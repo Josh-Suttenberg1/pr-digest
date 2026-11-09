@@ -144,7 +144,7 @@ class BuildSectionsTest(unittest.TestCase):
         with contextlib.redirect_stdout(out), \
                 unittest.mock.patch.object(menu, "_reviews_on", return_value=False):
             menu.others_rows(s, {})
-        top = [x.split(" | ")[0].strip("\u00a0") for x in out.getvalue().splitlines()
+        top = [x.split(" | ")[0].strip("─ ") for x in out.getvalue().splitlines()
                if not x.startswith("--")]
         self.assertEqual(top[0], "Other PRs")
         self.assertEqual([x for x in top if x in ("Needs you", "Waiting on others")],
