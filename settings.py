@@ -41,7 +41,6 @@ DEFAULTS: dict = {
     "watcher": {
         "poll_interval": 120,
         "required_approvals": 2,
-        "max_concurrent": 2,
         "followup_timeout": 600,
         "max_notifs_per_tick": 6,
         # Re-approve a PR you approved once the author has done everything your comments

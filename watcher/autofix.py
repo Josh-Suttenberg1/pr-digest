@@ -1195,9 +1195,9 @@ class Fix:
 
 def start_queued(cfg: dict, spawn: Callable[[str], int] | None = None,
                  logged_in: Callable[[], bool | None] = followup.claude_logged_in) -> tuple[int, bool]:
-    """Start queued fixes, one per PR at a time and up to watcher.max_concurrent in
-    all. A running job whose process died escalates. Returns (started, claude logged
-    out). Starts nothing while `[autofix] enabled` is off."""
+    """Start queued fixes, one per PR at a time: two fixes never work on the same
+    branch at once. A running job whose process died escalates. Returns (started,
+    claude logged out). Starts nothing while `[autofix] enabled` is off."""
     jobs = all_jobs()
     for job in jobs:
         if job["status"] == "running" and not followup._alive(job.get("pid")):
@@ -1207,17 +1207,16 @@ def start_queued(cfg: dict, spawn: Callable[[str], int] | None = None,
     if not cfg["autofix"]["enabled"]:
         return 0, False
     busy = {j["pr"]["id"] for j in jobs if j["status"] == "running"}
-    room = cfg["watcher"]["max_concurrent"] - len(busy)
     queued = sorted((j for j in jobs if j["status"] == "queued"),
                     key=lambda j: j.get("created_at") or "")
-    if not queued or room <= 0:
+    if not queued:
         return 0, False
     if logged_in() is False:
         return 0, True
     spawn = spawn or _spawn
     started = 0
     for job in queued:
-        if started >= room or job["pr"]["id"] in busy:
+        if job["pr"]["id"] in busy:
             continue
         pid = spawn(job["id"])
         job.update(status="running", pid=pid, started_at=int(time.time()))

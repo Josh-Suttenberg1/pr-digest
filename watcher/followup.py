@@ -258,21 +258,19 @@ def claude_logged_in() -> bool | None:
 
 
 def start_queued(cfg: dict) -> tuple[int, bool]:
-    """Start queued jobs up to max_concurrent. Returns (started, claude_logged_out)."""
+    """Start every queued job. Returns (started, claude_logged_out)."""
     jobs = all_jobs()
     for job in jobs:   # a run that died (crash, reboot) without finishing
         if job["status"] == "running" and not _alive(job.get("pid")):
             job.update(status="failed", error="the follow-up process died")
             save_job(job)
-    running = sum(1 for j in jobs if j["status"] == "running")
     queued = [j for j in jobs if j["status"] == "queued"]
-    room = cfg["watcher"]["max_concurrent"] - running
-    if not queued or room <= 0:
+    if not queued:
         return 0, False
     if claude_logged_in() is False:
         return 0, True
     started = 0
-    for job in queued[:room]:
+    for job in queued:
         proc = subprocess.Popen(
             [sys.executable, "-m", "watcher", "followup-run", job["id"]],
             cwd=settings.REPO_DIR, start_new_session=True, env=_env(),
