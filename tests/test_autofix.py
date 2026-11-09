@@ -514,6 +514,8 @@ class PipelineTest(Base):
         (wt / ".git").mkdir()
         (wt / "elm.json").write_text("{}")
         (wt / "package.json").write_text("{}")
+        (self.tmp / "ws" / "api").mkdir()
+        (self.tmp / "ws" / "api" / ".env").write_text("AVETTA_ENV=x\n")
 
         class ElmFake(Fake):
             def __init__(self, gate):
@@ -538,6 +540,7 @@ class PipelineTest(Base):
         self.assertIn("Bash(git push:*)", denied)
         self.assertIn("Bash(git commit:*)", denied)
         self.assertNotIn("npm ci --no-audit --no-fund", [c[-1] for c in ok.calls])
+        self.assertEqual((wt / ".env").read_text(), "AVETTA_ENV=x\n")
 
         bad = ElmFake({"validation": "pass", "conventions": "fail",
                        "must_fix": ["src/A.elm:3 — helpers after callers — move it"]})

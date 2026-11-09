@@ -129,8 +129,9 @@ Decide:
   comment: no design choice, no behavior question, nothing to ask @{me} or @{reviewer}.
 - "confidence": from 0 to 1, how sure you are that the fix, made exactly as you plan
   it, is correct and is what @{reviewer} meant.
-- "files": every file the fix changes, relative to the repo root (normally just
-  {path}).
+- "files": every file the fix changes or creates, relative to the repo root (normally
+  just {path}). A fix may touch other files when the comment itself asks for it; name
+  them all, since the fix is held to exactly this list.
 - "plan": the exact edit, concretely, in one to three sentences.
 - "reason": one sentence on your judgment, for @{me} to read when you say no.
 
@@ -167,7 +168,7 @@ ELM_GATE_BASH = [
     "Bash(npx husky)", "Bash(git diff:*)", "Bash(git ls-files:*)", "Bash(git status:*)",
     "Bash(git log:*)", "Bash(git show:*)", "Bash(lsof:*)", "Bash(grep:*)", "Bash(sort:*)",
     "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
-    "Bash([ -d .husky/_ ]:*)", "Bash(test -d:*)",
+    "Bash([ -d .husky/_ ]:*)", "Bash(test -d:*)", "Bash(pwd)", "Bash(git rev-parse:*)",
 ]
 NEVER_BASH = ["Bash(git push:*)", "Bash(git commit:*)", "Bash(git reset:*)",
               "Bash(git checkout:*)", "Bash(git merge:*)", "Bash(git rebase:*)",
@@ -1012,10 +1013,15 @@ class Fix:
         return f"`{cmd}` passed"
 
     def _validate_elm(self, step: str) -> str:
-        """npm ci when the clone has no node_modules, then one headless session that runs
-        the elm-validation agent and, when it passes, the elm-conventions-review agent.
-        A failing gate or any conventions must-fix escalates; only Josh can waive one."""
+        """The gitignored .env copied from your clone of the repo when the fix's clone has
+        none (the dev server the mocked Playwright specs run against reads it), npm ci
+        when it has no node_modules, then one headless session that runs the
+        elm-validation agent and, when it passes, the elm-conventions-review agent. A
+        failing gate or any conventions must-fix escalates; only Josh can waive one."""
         timeout = int(self.cfg["autofix"]["validate_timeout"])
+        local_env = settings.path_of(self.cfg["repos_root"]) / self.pr["repo"] / ".env"
+        if not (self.wt / ".env").exists() and local_env.is_file():
+            shutil.copyfile(local_env, self.wt / ".env")
         if not (self.wt / "node_modules").is_dir():
             proc = self._sh(step, "npm ci --no-audit --no-fund", timeout)
             if proc.returncode != 0:
