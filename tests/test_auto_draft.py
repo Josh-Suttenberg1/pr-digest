@@ -187,6 +187,84 @@ class StoreTest(unittest.TestCase):
         self.assertEqual((saved["status"], saved["kind"], saved["pid"]), ("running", "full", 4242))
 
 
+class RunJobTest(unittest.TestCase):
+    """The detached run's routing: carry forward, update, or full review."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.patches = [mock.patch.object(A, "DRAFTS_STATE", root / "drafts"),
+                        mock.patch.object(record, "INDEX_DIR", root / "reviews"),
+                        mock.patch.object(A, "_try_pr_diff", lambda *a: None),
+                        mock.patch.object(A.interdiff, "fetch", lambda *a: "tip")]
+        for p in self.patches:
+            p.start()
+        record.save({"repo": "api", "number": 7, "head": HEAD, "draft": ""})
+        A.save_job({**job(status="running", kind="update", run_head=NEW),
+                    "pr": {"url": URL, "repo": "api", "number": 7, "base": "main"}})
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.tmp.cleanup()
+
+    def delta(self, **kw):
+        base = {"empty": False, "files": {"a.py": ""}, "lines": 5, "pr_lines": 100,
+                "new_files": [], "commits": 1, "method": "replay", "new_merge_base": "m",
+                "new_fingerprint": {"sha": "s", "files": {}}}
+        return {**base, **kw}
+
+    def run_job(self, delta=None, compute_error=None):
+        from review import review_pr, update_review
+        compute = mock.Mock(return_value=delta, side_effect=compute_error)
+        full = mock.Mock(return_value=[])
+        upd = mock.Mock(return_value={"history": [{"summary": "Since x: no new issues."}]})
+        with mock.patch.object(A.interdiff, "compute", compute), \
+                mock.patch.object(review_pr, "review", full), \
+                mock.patch.object(update_review, "run", upd), \
+                mock.patch.object(update_review, "fetch_threads", lambda *a: []), \
+                mock.patch("names.book", lambda fetch=False: {}):
+            rc = A.run_job("api#7", cfg())
+        return rc, full, upd, A.load_job("api#7")
+
+    def test_a_small_delta_gets_an_update_review(self):
+        rc, full, upd, j = self.run_job(self.delta())
+        self.assertEqual((rc, j["status"], j["outcome"]), (0, "done", "Since x: no new issues."))
+        upd.assert_called_once()
+        full.assert_not_called()
+
+    def test_an_empty_delta_carries_the_draft_forward(self):
+        rc, full, upd, j = self.run_job(self.delta(empty=True, files={}, lines=0))
+        self.assertEqual(record.load("api", 7)["head"], NEW)
+        full.assert_not_called()
+        upd.assert_not_called()
+
+    def test_a_new_file_gets_a_full_review(self):
+        rc, full, upd, j = self.run_job(self.delta(new_files=["b.py"]))
+        full.assert_called_once()
+        self.assertIn("outside what was reviewed", j["outcome"])
+
+    def test_an_uncomputable_delta_gets_a_full_review(self):
+        rc, full, upd, j = self.run_job(compute_error=A.interdiff.InterdiffError("gone"))
+        full.assert_called_once()
+        self.assertIn("can't be computed", j["full_because"])
+
+    def test_a_failure_is_recorded(self):
+        rc, full, upd, j = self.run_job(compute_error=None, delta=self.delta())
+        self.assertEqual(rc, 0)
+        from review import update_review
+        with mock.patch.object(A.interdiff, "compute", return_value=self.delta()), \
+                mock.patch.object(update_review, "fetch_threads", side_effect=RuntimeError("boom")), \
+                mock.patch("names.book", lambda fetch=False: {}):
+            j2 = {**A.load_job("api#7"), "status": "running", "kind": "update"}
+            A.save_job(j2)
+            record.save({"repo": "api", "number": 7, "head": HEAD, "draft": ""})
+            with mock.patch("sys.stderr"):
+                self.assertEqual(A.run_job("api#7", cfg()), 1)
+        self.assertEqual((A.load_job("api#7")["status"], A.load_job("api#7")["error"]),
+                         ("failed", "boom"))
+
+
 def cfg(**review):
     c = settings._merge(settings.DEFAULTS, {"me": "me", "review": {"auto_draft": True, **review},
                                             "triage": {"pod": ["pal"]}})

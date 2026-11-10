@@ -402,6 +402,14 @@ def record_pr_diff(rec: dict, pr: dict, cfg: dict, index_dir: Path | None = None
     return rec
 
 
+def _try_pr_diff(rec: dict, pr: dict, cfg: dict, index_dir: Path | None) -> None:
+    """record_pr_diff, when the clone can give it; the draft stands either way."""
+    try:
+        record_pr_diff(rec, pr, cfg, index_dir)
+    except (interdiff.InterdiffError, subprocess.SubprocessError, OSError):
+        pass
+
+
 def run_job(key: str, cfg: dict, state_dir: Path | None = None,
             index_dir: Path | None = None) -> int:
     """The detached run behind `python -m watcher draft-run <repo>#<n>`: a full draft,
@@ -417,10 +425,16 @@ def run_job(key: str, cfg: dict, state_dir: Path | None = None,
     try:
         rec = rec_mod.load(pr["repo"], pr["number"], index_dir)
         kind = job.get("kind") if rec else "full"
+        delta = None
         if kind == "update":
             clone = clone_of(cfg, pr["repo"])
-            tip = interdiff.fetch(clone, pr["number"], pr["base"], [rec["head"], head])
-            delta = interdiff.compute(clone, tip, rec["head"], head)
+            try:
+                tip = interdiff.fetch(clone, pr["number"], pr["base"], [rec["head"], head])
+                delta = interdiff.compute(clone, tip, rec["head"], head)
+            except (interdiff.InterdiffError, subprocess.SubprocessError, OSError) as exc:
+                job["full_because"] = f"the changes since the draft can't be computed: {str(exc)[:120]}"
+                kind = "full"
+        if kind == "update" and delta is not None:
             why_full = interdiff.needs_full_review(delta, float(cfg["review"]["update_max_share"]))
             job["delta"] = {"lines": delta["lines"], "files": sorted(delta["files"]),
                             "pr_lines": delta["pr_lines"], "new_files": delta["new_files"],
@@ -437,17 +451,14 @@ def run_job(key: str, cfg: dict, state_dir: Path | None = None,
                                                       pr["number"], set(cfg["watcher"]["bots"]))
                 out = update_review.run(rec, pr, delta, rec["head"], head, clone, cfg, threads,
                                         names.book(fetch=True), index_dir=index_dir)
-                record_pr_diff(out, pr, cfg, index_dir)
+                _try_pr_diff(out, pr, cfg, index_dir)
                 outcome = out["history"][-1]["summary"]
         if kind == "full" and not outcome:
             records = review_pr.review(pr["url"], None, None, False, cfg)
             for r in records:
                 if r["repo"] == pr["repo"] and r["number"] == pr["number"]:
-                    try:
-                        record_pr_diff(rec_mod.load(r["repo"], r["number"], index_dir) or r, pr,
-                                       cfg, index_dir)
-                    except interdiff.InterdiffError:
-                        pass
+                    _try_pr_diff(rec_mod.load(r["repo"], r["number"], index_dir) or r, pr, cfg,
+                                 index_dir)
             outcome = "full draft written" + (f" ({job['full_because']})" if job.get("full_because") else "")
     except Exception as exc:  # noqa: BLE001 — every failure is recorded on the job
         job = load_job(key, state_dir) or job
