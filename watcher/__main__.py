@@ -7,6 +7,10 @@
     python -m watcher autofix-run <job | comment link> [--dry-run]
                                                        one auto-fix (started by tick); --dry-run
                                                        runs it up to the commit and prints it
+    python -m watcher drafts [--dry-run] [--limit N] [--only <PR url>] [--print-popups]
+                                                       one pass of the automatic review drafts
+                                                       (review/auto_draft.py), on its own
+    python -m watcher draft-run <repo>#<n>             one draft or update (started by a pass)
     python -m watcher notify-test                      a red and a yellow alert, each with its sound
     python -m watcher install                          write and load the launchd jobs (the
                                                        watcher, and the weekly lessons refresh)
@@ -28,6 +32,11 @@ Auto-fixes (watcher/autofix.py), while `[autofix] enabled` is on: a new nit or
 suggestion that opens a thread on your PR (events.opened_threads) queues a fix before
 the PR is classified, and a comment being fixed doesn't count, so it pops nothing up.
 The fix's run sends its own quiet "✅ Fixed for you", or a red alert when it escalates.
+
+Automatic review drafts (review/auto_draft.py), while `[review] auto_draft` is on: each
+tick ends with a pass that starts a draft for every review you owe that has none,
+updates drafts the author has pushed past, and sends a review's one notification once
+its draft is ready (or failed, or late).
 
 A notification only links to something that exists. Yours open a Claude session on
 the PR's comments (prdigest://respond). A follow-up or mention waits in
@@ -424,6 +433,7 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
         print(f"-- {len(events)} event(s) on {len({e['pr']['id'] for e in events})} PR(s); "
               f"{len(ready)} notification(s) now, {len(pending)} waiting for drafts; "
               f"{len(todo)} PR(s) fetched in detail; cutoff {cutoff}")
+        drafts_pass(cfg, dry_run=True)
         return 0
 
     st["notified"] = {pid: n for pid, n in notified.items() if pid in prs}
@@ -443,8 +453,22 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
         _notice(cfg, "⚠️ claude CLI is logged out", "Follow-ups are waiting. Run: claude auth login", "alert")
     st["claude_auth_alerted"] = logged_out
     state.save(st)
+    drafts_pass(cfg)
     _refresh_menu(cfg)
     return 0
+
+
+def drafts_pass(cfg: dict, dry_run: bool = False, **kw) -> list[dict]:
+    """The automatic review drafts' pass (review/auto_draft.py tick), while `[review]
+    auto_draft` is on. A failure is logged and never stops the watcher."""
+    from review import auto_draft
+    if not auto_draft.enabled(cfg):
+        return []
+    try:
+        return auto_draft.tick(cfg, dry_run, log=lambda m: print(m, flush=True), **kw)
+    except Exception as exc:  # noqa: BLE001
+        print(f"drafts: the pass failed: {str(exc)[:200]}", flush=True)
+        return []
 
 
 def autofix_candidates(detail: dict[str, dict], prev: dict, ctx: ev.Ctx,
@@ -478,10 +502,20 @@ def status(cfg: dict) -> int:
         "autofixes": {s: sum(1 for j in autofix.all_jobs() if j["status"] == s)
                       for s in sorted({j["status"] for j in autofix.all_jobs()})},
         "autofix_enabled": cfg["autofix"]["enabled"], "autofix_dry_run": cfg["autofix"]["dry_run"],
+        "auto_draft": cfg["review"]["auto_draft"],
+        "drafts": _draft_counts(),
         "launchd_loaded": subprocess.run(["launchctl", "print", f"gui/{_uid()}/{LABEL}"],
                                          capture_output=True).returncode == 0,
     }, indent=2))
     return 0
+
+
+def _draft_counts() -> dict[str, int]:
+    from review import auto_draft
+    out: dict[str, int] = {}
+    for job in auto_draft.all_jobs().values():
+        out[job.get("status") or "?"] = out.get(job.get("status") or "?", 0) + 1
+    return out
 
 
 def _uid() -> int:
@@ -551,6 +585,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("install")
     for name in ("post", "dismiss", "followup-run"):
         sub.add_parser(name).add_argument("job")
+    d = sub.add_parser("drafts")
+    d.add_argument("--dry-run", action="store_true", help="say what it would do; change nothing")
+    d.add_argument("--limit", type=int, help="start at most this many drafts or updates")
+    d.add_argument("--only", help="act on this PR url only")
+    d.add_argument("--print-popups", action="store_true",
+                   help="print the notifications instead of sending them")
+    sub.add_parser("draft-run").add_argument("job", help="<repo>#<n>")
     a = sub.add_parser("autofix-run")
     a.add_argument("job", help="a job id, or (with --dry-run) a review comment link")
     a.add_argument("--dry-run", action="store_true",
@@ -583,6 +624,28 @@ def main(argv: list[str] | None = None) -> int:
         return rc
     if args.cmd == "followup-run":
         rc = followup.run(args.job, cfg)
+        _refresh_menu(cfg)
+        return rc
+    if args.cmd == "drafts":
+        from review import auto_draft
+        if not auto_draft.enabled(cfg):
+            print("[review] auto_draft is off (or reviewer_agent is empty)", file=sys.stderr)
+            return 2
+        deliver = None
+        if args.print_popups:
+            deliver = lambda ns: auto_draft.notify_reviews(ns, cfg, dry_run=True)  # noqa: E731
+        auto_draft.tick(cfg, args.dry_run, limit=args.limit, only=args.only, deliver=deliver)
+        if not args.dry_run:
+            _refresh_menu(cfg)
+        return 0
+    if args.cmd == "draft-run":
+        from review import auto_draft
+        rc = auto_draft.run_job(args.job, cfg)
+        # Send the review's notification now rather than at the next tick, unless a
+        # tick holds the lock (it sends it then), so the row and the popup arrive together.
+        job = auto_draft.load_job(args.job)
+        if job and state.lock() is not None:
+            drafts_pass(cfg, only=job["pr"]["url"])
         _refresh_menu(cfg)
         return rc
     if args.cmd == "autofix-run":

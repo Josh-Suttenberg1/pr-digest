@@ -16,6 +16,12 @@ workspace = "~/work"
 reviewer_agent = "pr-reviewer"
 # A second agent that checks the reviewer's findings before you see them. "" skips it.
 verifier_agent = "pr-review-verifier"
+# Draft every review you owe on its own, and update the draft when the author pushes.
+# The review's menu row and notification wait until its draft is ready.
+auto_draft = false
+# quiet_minutes = 10              # wait this long after the last push before an update
+# fallback_minutes = 45           # show the review anyway if no draft is ready by then
+# update_max_share = 0.5          # new commits past this share of the PR: full re-review
 
 [watcher]
 # Re-approve for you after the author pushes, but only once they've done everything

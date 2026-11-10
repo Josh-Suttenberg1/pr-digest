@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import notify  # noqa: E402
 import settings  # noqa: E402
+from review import record as review_record  # noqa: E402
 
 REVIEW_INDEX_DIR = settings.STATE_DIR / "reviews"
 RUNS_DIR = Path("~/.cache/pr-digest/reviews").expanduser()
@@ -226,6 +227,7 @@ def write_drafts(final: str, meta: dict, drafts_dir: Path) -> list[dict]:
             text = final
         draft.write_text(text)
         counts = count_findings(block["body"])
+        prev = review_record.load(block["repo"], block["number"], REVIEW_INDEX_DIR) or {}
         record = {
             "key": block["key"],
             "repo": block["repo"],
@@ -236,6 +238,11 @@ def write_drafts(final: str, meta: dict, drafts_dir: Path) -> list[dict]:
             "draft": str(draft),
             "story": str(story_path) if story_path else None,
             **meta,
+            "findings": review_record.parse_findings(block["body"]),
+            "history": (prev.get("history") or []) + [{
+                "kind": "full", "from": prev.get("head"), "to": block["head"],
+                "at": meta.get("generated_at"), "cost_usd": meta.get("cost_usd"),
+                "duration_s": meta.get("duration_s")}],
         }
         draft.with_suffix(".json").write_text(json.dumps(record, indent=2) + "\n")
         (REVIEW_INDEX_DIR / f"{block['repo']}#{block['number']}.json").write_text(

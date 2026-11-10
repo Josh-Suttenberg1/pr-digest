@@ -234,7 +234,8 @@ def write_status(data: dict) -> None:
         people = _people(fetch=True)
         status_report.write(build_sections(data, _followup_jobs(), load_dismissed(), required,
                                            people, prio=_priority_settings(),
-                                           autofix_jobs=_autofix_jobs()),
+                                           autofix_jobs=_autofix_jobs(),
+                                           drafts=_draft_states(data)),
                             data, people, required=required)
     except Exception:  # noqa: BLE001 — the status files must never break the menu
         pass
@@ -355,7 +356,8 @@ def grouped(entries: list[dict], groups: dict[str, dict]) -> list[dict]:
 def build_sections(data: dict, followup_jobs: list[dict],
                    dismissed: dict[str, str] | None = None, required: int = 2,
                    nick: dict[str, str] | None = None, now: datetime | None = None,
-                   prio: dict | None = None, autofix_jobs: list[dict] | None = None) -> dict:
+                   prio: dict | None = None, autofix_jobs: list[dict] | None = None,
+                   drafts: dict[str, dict] | None = None) -> dict:
     """Sort cached data into the menu's sections through triage/priority.py.
 
     Returns {"mine", "mine_drafts", "followups", "owed", "other", "others_needs",
@@ -377,6 +379,10 @@ def build_sections(data: dict, followup_jobs: list[dict],
     with no dot collapse into `mine_drafts`. `dismissed` maps a PR url to the activity
     time it was dismissed at; the row loses its dot until something newer happens.
 
+    `drafts` (PR url → {"state", "tooltip"}) is given while automatic review drafts
+    are on (`_draft_states`): a review you owe shows its draft's state, and stays off
+    the menu until its draft is ready (priority.classify).
+
     `title` is the menu-bar title (priority.title) and `count` the PRs it counts."""
     nick = nick or {}
     now = now or datetime.now(timezone.utc)
@@ -386,7 +392,7 @@ def build_sections(data: dict, followup_jobs: list[dict],
         data.get("mine") or [], reviews, followup_jobs, nick=nick, now=now,
         required=required, stale_after_days=prio["stale_after_days"],
         max_engaged=prio["max_engaged_for_stale"], dismissed=dismissed or {},
-        autofix=autofix_jobs or [], pod=frozenset(prio.get("pod") or ()))
+        autofix=autofix_jobs or [], pod=frozenset(prio.get("pod") or ()), drafts=drafts)
 
     ranked = {st.get("pr_url"): i for i, st in enumerate(reviews.get("needs_you") or [])}
     mine_rows = [e for e in entries if e["section"] == priority.MINE]
@@ -633,7 +639,7 @@ def owed_block(e: dict, nick: dict[str, str]) -> None:
     st = e["st"]
     url = e["url"]
     key = _key(url)
-    emit(row_text(e), href=url)
+    emit(row_text(e), href=url, tooltip=sanitize(e.get("tooltip") or ""))
     _pr_header(e)
     emit(f"--{st.get('size', '')} · by {_who(st.get('author', '?'), nick)}", color="#888888")
     if _reviews_on():
@@ -1177,6 +1183,25 @@ def _reviews_on() -> bool:
         return True
 
 
+def _draft_states(data: dict) -> dict[str, dict] | None:
+    """Each review candidate's automatic draft state (review/auto_draft.py states), or
+    None while `[review] auto_draft` is off or the states can't be read, which leaves
+    the review rows as they are without automatic drafts."""
+    try:
+        import time
+
+        import settings
+        from review import auto_draft
+        cfg = settings.load()
+        if not auto_draft.enabled(cfg):
+            return None
+        sts = auto_draft.candidates(data)
+        return auto_draft.states(sts, auto_draft.all_jobs(), auto_draft.records_for(sts),
+                                 time.time(), cfg["review"]["fallback_minutes"], menu=True)
+    except Exception:  # noqa: BLE001 — the menu must render
+        return None
+
+
 def _required_approvals() -> int:
     try:
         import settings
@@ -1366,7 +1391,8 @@ def main() -> int:
     nick = _people()
     sections = build_sections(cache if have_data else {}, _followup_jobs(), load_dismissed(),
                               required, nick, prio=_priority_settings(),
-                              autofix_jobs=_autofix_jobs())
+                              autofix_jobs=_autofix_jobs(),
+                              drafts=_draft_states(cache) if have_data else None)
     render_menu(sections, spinner=fetching, error=cache.get("error"),
                 have_data=have_data, nick=nick, required=required)
     return 0
