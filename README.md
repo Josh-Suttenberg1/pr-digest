@@ -100,6 +100,7 @@ if you want them, Claude reviews and automatic re-approval. macOS only.
 | `repos_root` | Only if your clones live somewhere other than the workspace. |
 | `[review] reviewer_agent` | Your review agent's name. `""` turns reviews off. |
 | `[review] verifier_agent` | An agent that checks the reviewer's findings before you see them. `""` skips it. |
+| `[review] auto_draft` | Off by default. When on, every review you owe gets a draft without being asked, and the draft updates itself when the author pushes (see "Automatic review drafts"). |
 | `[watcher] auto_reapprove` | Off by default. When on, it re-approves a PR you approved once the author has done everything your comments asked and no blocking comment or change request from anyone is left unanswered. The follow-up's menu entry says what's holding it otherwise. |
 | `[notify] sounds` | `false` makes every notification silent. |
 
@@ -172,6 +173,9 @@ sections, and each PR appears in exactly one:
        dismissed). 🟡 when stalled: waiting more than `[priority] stale_after_days`,
        under the required approvals, and at most `max_engaged_for_stale` others
        engaged. 🟢 otherwise. Each row has its review draft's status and actions.
+       With `[review] auto_draft` on, the row names who approved and the draft's
+       state (`Review it · Mykal approved (1 of 2) · draft ready · 5d`), its tooltip
+       says what the draft cost, and it appears only once the draft is ready.
    - **Waiting on others:** PRs you left comments or a change request on whose author
      hasn't responded to them yet, with how long since your review. No dot.
    - **Nothing needed (N):** a collapsed submenu with the rest (parked, already
@@ -220,6 +224,29 @@ if the drafts don't come within 30 minutes it goes out linking to the comment on
 GitHub. A re-request on its own opens the PR. Every notification the
 watcher sends is logged to `~/.cache/pr-digest/watcher.log`. Set SwiftBar to
 **Alerts** in System Settings → Notifications so they stay on screen.
+
+### Automatic review drafts
+
+With `[review] auto_draft = true`, the watcher's tick also runs `review/auto_draft.py`:
+
+- **Every review you owe gets a draft,** in the order the review list ranks them, with
+  no limit on how many run at once. A PR that already has the required approvals gets
+  none, unless its author is in `[triage] pod`.
+- **The row and the notification wait for the draft.** Nothing shows while it's being
+  written. Then the row appears with `draft ready` and one notification opens the draft
+  as a page. If the draft fails, or isn't ready after `fallback_minutes` (45), the row
+  and notification come anyway with `draft failed` or `no draft`.
+- **New commits update the draft.** A merge from the base branch that changes nothing in
+  the PR's own diff leaves the draft current. Other new commits mark it `draft outdated`
+  and, once the author has stopped pushing for `quiet_minutes` (10), an update review
+  covers only what changed (`review/interdiff.py`, `review/update_review.py`): each
+  earlier finding addressed or not, each open review comment on the changed lines, and
+  any new issue, at the top of the draft. When the change passes `update_max_share` of
+  the PR's changed lines, or touches a file the draft never saw, a full review runs
+  instead. The row goes back to `draft ready` with no second notification.
+- `bin/watcher drafts --dry-run` says what a pass would start; `bin/watcher status`
+  counts the drafts by state; `state/drafts/<repo>#<n>.json` holds each PR's
+  scheduling state and `state/reviews/<repo>#<n>.json` what its draft reviewed.
 
 Other people's comments on PRs you haven't engaged with never appear. Bots (GitHub
 Apps, `*[bot]` logins, and the `bots` list in `~/.config/pr-digest/config.toml`) never
@@ -352,6 +379,8 @@ The tool exits non-zero with a clear message on:
 | `gh_prs.py` | Shared fetch/auth logic (used by both front-ends). |
 | `pr_digest.py` | The CLI — prints the digest and writes the dated file. |
 | `swiftbar_plugin.py` | The SwiftBar menu: fetch, sort into sections, render. |
+| `review/review_pr.py`, `bin/review-pr` | Runs the reviewer and verifier agents and saves the draft. |
+| `review/auto_draft.py`, `review/interdiff.py`, `review/update_review.py`, `review/record.py` | Automatic drafts and their updates on new commits; the per-PR record of what was reviewed. |
 | `review/view_draft.py`, `url-handler/` | Draft pages in the browser + the `prdigest://` handler for Discuss with Claude. |
 | `status_report.py` | Writes `output/status/` on each menu refresh: one plain-text file per PR saying where the menu put it and why, plus `index.md`, for Claude sessions to read. |
 | `triage/` | Whose move is it: reviews you owe (`reviews.py`), your PRs waiting on you (`mine.py`). |

@@ -33,6 +33,16 @@ DEFAULTS: dict = {
         "verifier_agent": "pr-review-verifier",
         "drafts_dir": str(OUTPUT_DIR / "reviews"),
         "timeout": 3600,
+        # review/auto_draft.py: draft every review you owe without being asked, and
+        # update a draft when new commits arrive. Off: drafts start only from the menu.
+        "auto_draft": False,
+        # An update starts once the PR's head has been still this long.
+        "quiet_minutes": 10,
+        # A review whose draft isn't ready this long after the request shows anyway.
+        "fallback_minutes": 45,
+        # New commits that change more than this share of the PR's changed lines get a
+        # full review instead of an update review.
+        "update_max_share": 0.5,
     },
     "models": {
         "followup": "sonnet",

@@ -527,10 +527,16 @@ def followup(jobs: list[dict], nick: dict[str, str], *, author: str = "",
 
 def owed(st: dict, nick: dict[str, str], now: datetime, *, required: int = 2,
          stale_after_days: float = 2, max_engaged: int = 1,
-         dismissed_at: str | None = None, pod: bool = False) -> dict:
+         dismissed_at: str | None = None, pod: bool = False,
+         draft: str | None = None) -> dict:
     """A PR waiting on your first review (or a fresh one after yours was dismissed).
     `pod` (the author is in `[triage] pod`) makes it red from the start: a pod member's
-    PR is yours to review first, however long it has waited."""
+    PR is yours to review first, however long it has waited.
+
+    `draft` is the state of its automatic review draft (review/auto_draft.py: "draft
+    ready", "draft outdated", "draft failed", "no draft"), given while `[review]
+    auto_draft` is on. The row then names who approved and says the draft's state:
+    'Review it · Mykal approved (1 of 2) · draft ready · 5d'."""
     since = st.get("waiting_since") or st.get("created_at") or ""
     engaged = list(st.get("engaged") or [])
     n = len(st.get("approvals") or [])
@@ -540,9 +546,16 @@ def owed(st: dict, nick: dict[str, str], now: datetime, *, required: int = 2,
     approvals = "no approvals" if not n else _plural(n, "approval")
     dismissed_review = (st.get("mine") or [None])[0] == "DISMISSED"
 
-    reason = _with_age(f"Review it · {tally(n, required)}", since, now)
-    if color == GREEN and len(engaged) > max_engaged:
-        reason += f" · {names(engaged, nick)} are on it"
+    if draft:
+        approvers = sorted(st.get("approvals") or [])
+        count = f"{n} of {required}" if n <= required else f"{n} approvals"
+        approved = (f"{names(approvers, nick)} approved ({count})" if approvers
+                    else tally(n, required))
+        reason = _with_age(f"Review it · {approved} · {draft}", since, now)
+    else:
+        reason = _with_age(f"Review it · {tally(n, required)}", since, now)
+        if color == GREEN and len(engaged) > max_engaged:
+            reason += f" · {names(engaged, nick)} are on it"
     if dismissed_review:
         reason = "Your review was dismissed · " + reason
 
@@ -743,13 +756,19 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
              nick: dict[str, str], now: datetime, required: int = 2,
              stale_after_days: float = 2, max_engaged: int = 1,
              dismissed: dict[str, str] | None = None,
-             autofix: list[dict] | None = None, pod=frozenset()) -> list[dict]:
+             autofix: list[dict] | None = None, pod=frozenset(),
+             drafts: dict[str, dict] | None = None) -> list[dict]:
     """One entry per PR: {url, title, section, color, reason, why, waiting_since,
     activity_at, dismissed, row | st, jobs}. `pod` holds the logins whose PRs are
     red reviews from the start (`owed`). `reviews` is review_triage's buckets
     (needs_you in ranked order); `jobs` every follow-up job; `dismissed` url → the
     activity time it was dismissed at; `autofix` every auto-fix job, which only your
-    PRs carry (an entry's `autofix`)."""
+    PRs carry (an entry's `autofix`).
+
+    `drafts` (PR url → {"state", "tooltip"}, review/auto_draft.py states) is given
+    while automatic drafts are on. A review you owe then carries its draft state in
+    its reason and its `tooltip`, and one with no state yet (its draft is still being
+    written) gets no entry at all: no row, no count, until the draft is ready."""
     dismissed = dismissed or {}
     fixes = jobs_by_url(autofix or [])
     out: list[dict] = []
@@ -787,10 +806,15 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
                 out.append({**base, **f, "group": NEEDS})
             elif fresh and (_owed_review(st) or (st.get("author") in pod
                                                   and _owed_pod_review(st))):
-                out.append({**base, "jobs": [], "group": NEEDS, **owed(
-                    st, nick, now, required=required, stale_after_days=stale_after_days,
-                    max_engaged=max_engaged, dismissed_at=dismissed.get(url),
-                    pod=st.get("author") in pod)})
+                d = None if drafts is None else (drafts.get(url.rstrip("/")) or {})
+                if d is not None and not d.get("state"):
+                    continue
+                out.append({**base, "jobs": [], "group": NEEDS,
+                            "tooltip": (d or {}).get("tooltip") or "", **owed(
+                                st, nick, now, required=required,
+                                stale_after_days=stale_after_days, max_engaged=max_engaged,
+                                dismissed_at=dismissed.get(url), pod=st.get("author") in pod,
+                                draft=(d or {}).get("state"))})
             else:
                 out.append(_not_on_you(base, st, now, required))
 
