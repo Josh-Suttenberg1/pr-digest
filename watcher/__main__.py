@@ -641,6 +641,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "draft-run":
         from review import auto_draft
         rc = auto_draft.run_job(args.job, cfg)
+        # Send the review's notification now rather than at the next tick, unless a
+        # tick holds the lock (it sends it then), so the row and the popup arrive together.
+        job = auto_draft.load_job(args.job)
+        if job and state.lock() is not None:
+            drafts_pass(cfg, only=job["pr"]["url"])
         _refresh_menu(cfg)
         return rc
     if args.cmd == "autofix-run":

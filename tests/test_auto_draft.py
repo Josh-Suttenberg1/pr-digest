@@ -58,6 +58,23 @@ class RowStateTest(unittest.TestCase):
         self.assertEqual(A.row_state(failed, rec(), newer, None, NOW), A.OUTDATED)
 
 
+class ShownTest(unittest.TestCase):
+    def test_the_menu_waits_for_the_notification(self):
+        st = [{"pr_url": URL, "head_sha": HEAD, "waiting_since": "2026-11-01T00:00:00Z"}]
+        done = job(status="done", seen_at=int(NOW - 600))
+        recs = {"api#7": rec()}
+        self.assertEqual(A.states(st, {"api#7": done}, recs, NOW)[URL]["state"], A.READY)
+        self.assertIsNone(A.states(st, {"api#7": done}, recs, NOW, menu=True)[URL]["state"])
+        announced = {**done, "announced_at": int(NOW - 5)}
+        self.assertEqual(A.states(st, {"api#7": announced}, recs, NOW, menu=True)[URL]["state"],
+                         A.READY)
+
+    def test_past_the_fallback_or_unhandled_it_shows(self):
+        self.assertTrue(A.shown(None, NOW))
+        self.assertTrue(A.shown(job(seen_at=int(NOW - 46 * 60)), NOW, 45))
+        self.assertFalse(A.shown(job(seen_at=int(NOW - 60)), NOW, 45))
+
+
 class NextStepTest(unittest.TestCase):
     def test_a_review_with_no_draft_starts_a_full_one(self):
         self.assertEqual(A.next_step(None, None, HEAD, NOW), "full")
@@ -264,6 +281,18 @@ class TickTest(unittest.TestCase):
         [note] = self.tick(NOW + 120)
         self.assertEqual(note["state"], A.FAILED)
         self.assertEqual(A.load_job("api#1")["error"], "the draft process died")
+
+    def test_a_request_the_triage_lacks_refreshes_it_at_most_every_few_minutes(self):
+        self.add(1)
+        calls = []
+        unknown = {"https://github.com/acme/api/pull/99": {"head": NEW}}
+        with mock.patch.object(A, "requested_heads", lambda c: unknown), \
+                mock.patch.object(A, "refresh_triage", lambda: calls.append(1) or True):
+            self.tick()
+            self.assertEqual(calls, [])
+            with mock.patch.object(A, "cached_triage", lambda: (self.cache, A.NEW_REQUEST_AGE + 1)):
+                self.tick()
+        self.assertEqual(calls, [1])
 
     def test_limit_and_only(self):
         self.add(1)

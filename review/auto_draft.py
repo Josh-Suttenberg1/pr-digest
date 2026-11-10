@@ -54,6 +54,8 @@ DRAFTS_STATE = settings.STATE_DIR / "drafts"
 MANUAL_STATE = settings.REPO_DIR / "review-drafter" / "state"   # inflight-<repo>#<n>
 # A cached triage older than this is refreshed in the background.
 CACHE_MAX_AGE = 15 * 60
+# A cached triage that lacks a PR requesting your review is refreshed once it's this old.
+NEW_REQUEST_AGE = 5 * 60
 
 READY, OUTDATED, FAILED, NO_DRAFT = "draft ready", "draft outdated", "draft failed", "no draft"
 
@@ -211,11 +213,22 @@ def tooltip(rec: dict | None, job: dict | None) -> str:
     return " · ".join(bits)
 
 
+def shown(job: dict | None, now: float, fallback_minutes: float = 45) -> bool:
+    """Whether the menu may show a review that has a draft state: the scheduler has
+    sent its notification, or it isn't handling it, or it has had longer than the
+    fallback to, so the row and the notification arrive together."""
+    if not job or job.get("announced_at"):
+        return True
+    seen = _epoch(job.get("seen_at"))
+    return seen is None or now - seen >= fallback_minutes * 60
+
+
 def states(sts: list[dict], jobs: dict[str, dict], recs: dict[str, dict | None], now: float,
-           fallback_minutes: float = 45) -> dict[str, dict]:
+           fallback_minutes: float = 45, menu: bool = False) -> dict[str, dict]:
     """PR url -> {"state", "tooltip"} for each review candidate (`sts`, triage
     records), for triage/priority.py classify's `drafts`. `jobs` and `recs` are keyed
-    by <repo>#<n>; the head is the scheduler's latest, else the triage's."""
+    by <repo>#<n>; the head is the scheduler's latest, else the triage's. With `menu`,
+    a review whose notification hasn't gone out yet has no state (`shown`)."""
     out = {}
     for st in sts:
         url = (st.get("pr_url") or "").rstrip("/")
@@ -224,9 +237,11 @@ def states(sts: list[dict], jobs: dict[str, dict], recs: dict[str, dict | None],
         key = pr_key(url)
         job, rec = jobs.get(key), recs.get(key)
         head = ((job or {}).get("head") or {}).get("sha") or st.get("head_sha") or ""
-        out[url] = {"state": row_state(job, rec, head, st.get("waiting_since") or st.get("created_at"),
-                                       now, fallback_minutes),
-                    "tooltip": tooltip(rec, job)}
+        state = row_state(job, rec, head, st.get("waiting_since") or st.get("created_at"),
+                          now, fallback_minutes)
+        if menu and not shown(job, now, fallback_minutes):
+            state = None
+        out[url] = {"state": state, "tooltip": tooltip(rec, job)}
     return out
 
 
@@ -471,7 +486,10 @@ def tick(cfg: dict, dry_run: bool = False, *, now: float | None = None, limit: i
         log(f"drafts: couldn't read requested PRs: {str(exc)[:120]}")
     known = {(st.get("pr_url") or "").rstrip("/") for b in (cache.get("reviews") or {}).values()
              for st in b}
-    if not cache.get("reviews") or age is None or age > CACHE_MAX_AGE or set(live) - known:
+    # A request the cached triage hasn't seen refreshes it, at most every NEW_REQUEST_AGE,
+    # since a PR the triage leaves out (closed meanwhile) stays unknown.
+    unknown = bool(set(live) - known) and (age is None or age > NEW_REQUEST_AGE)
+    if not cache.get("reviews") or age is None or age > CACHE_MAX_AGE or unknown:
         if not dry_run and refresh_triage():
             log("drafts: refreshing the cached triage")
     if not cache.get("reviews"):

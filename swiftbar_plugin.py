@@ -1197,7 +1197,7 @@ def _draft_states(data: dict) -> dict[str, dict] | None:
             return None
         sts = auto_draft.candidates(data)
         return auto_draft.states(sts, auto_draft.all_jobs(), auto_draft.records_for(sts),
-                                 time.time(), cfg["review"]["fallback_minutes"])
+                                 time.time(), cfg["review"]["fallback_minutes"], menu=True)
     except Exception:  # noqa: BLE001 — the menu must render
         return None
 
