@@ -33,7 +33,7 @@ from review import record as rec_mod
 from review import review_pr
 
 PROMPT_PATH = Path(__file__).resolve().parent / "update_prompt.md"
-COMMENT_VERDICTS = ("addressed", "partly", "not_addressed")
+from watcher.followup import VERDICTS as COMMENT_VERDICTS  # noqa: E402
 VERDICT_WORDS = {"addressed": "addressed", "partly": "partly addressed",
                  "not_addressed": "not addressed"}
 # Lines around a review comment's line that still count as "on the changed lines".
