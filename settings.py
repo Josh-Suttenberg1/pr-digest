@@ -47,6 +47,8 @@ DEFAULTS: dict = {
     "models": {
         "followup": "sonnet",
         "lessons": "sonnet",
+        # Judges whether an approval's comment only praises (watcher/fyi.py).
+        "fyi": "haiku",
     },
     "watcher": {
         "poll_interval": 120,

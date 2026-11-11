@@ -47,6 +47,10 @@ a popup out and withdraws the popups whose item is done (`settle_popups`): the P
 no color left, the review you owed was given, the escalated auto-fix was answered, or
 the PR merged or closed. The menu refetches when one is withdrawn.
 
+Each tick also finds FYIs (watcher/fyi.py): approvals of your PRs that ask nothing
+(`approval_fyis`), a PR of yours becoming Ready, and reviews you owed that stopped being
+owed without you (`owed_fyis`). Each is a ⚪ menu row and one quiet banner.
+
 A notification only links to something that exists. Yours open a Claude session on
 the PR's comments (prdigest://respond). A follow-up or mention waits in
 `state["pending"]` until Claude's drafted replies are written (`hold_for_drafts`),
@@ -75,8 +79,9 @@ import notify  # noqa: E402
 import settings  # noqa: E402
 from watcher import events as ev  # noqa: E402
 from triage import mine as mine_triage  # noqa: E402
+from triage import comment_kind  # noqa: E402
 from triage import priority  # noqa: E402
-from watcher import autofix, followup, gh, popups, render, state  # noqa: E402
+from watcher import autofix, followup, fyi, gh, popups, render, state  # noqa: E402
 
 LABEL = "com.josh.pr-digest-watcher"
 PLIST = Path(f"~/Library/LaunchAgents/{LABEL}.plist").expanduser()
@@ -120,10 +125,12 @@ def _paths_changed(tok: str):
     return changed
 
 
-def pr_priority(pr: dict, cfg: dict, jobs: list[dict]) -> tuple[str | None, str]:
+def pr_priority(pr: dict, cfg: dict, jobs: list[dict],
+                groups: dict[str, dict] | None = None) -> tuple[str | None, str]:
     """(color, reason) for one PR snapshot, through triage/priority.py. Your PRs take
     a fresh triage/mine.py row (one gh call); others' take their open follow-up jobs
-    (`jobs`, including this tick's new responses) and any pending re-request."""
+    (`jobs`, including this tick's new responses) and any pending re-request. A PR of
+    yours also leaves its sub-header and reason in `groups` (PR id -> {group, reason})."""
     nick = names.book(fetch=True)
     if pr["kind"] == "mine":
         try:
@@ -134,6 +141,8 @@ def pr_priority(pr: dict, cfg: dict, jobs: list[dict]) -> tuple[str | None, str]
         fixes = [j for j in autofix.all_jobs() if (j.get("pr") or {}).get("id") == pr["id"]]
         p = priority.mine(row, nick, cfg["watcher"]["required_approvals"],
                           stale_after_days=cfg["priority"]["stale_after_days"], autofix=fixes)
+        if groups is not None:
+            groups[pr["id"]] = {"group": p["group"], "reason": p["reason"]}
         return p["color"], p["reason"]
     f = priority.followup([j for j in jobs if (j.get("pr") or {}).get("id") == pr["id"]],
                           nick, author=pr["author"],
@@ -428,8 +437,10 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
     rechecked = followup.recheck_reapprovals(
         [pr for pr in detail.values() if pr["kind"] == "others"], jobs, cfg, dry_run)
     notified = {} if replay else st.get("notified", {})
+    groups_now: dict[str, dict] = {}
     notes = notifications(detail, events, jobs, notified, state.load_cleared(), now_iso,
-                          lambda pr, js: pr_priority(pr, cfg, js), seed=seeding or seed_colors)
+                          lambda pr, js: pr_priority(pr, cfg, js, groups_now),
+                          seed=seeding or seed_colors)
     pending = {} if replay else st.get("pending", {})
     ready = hold_for_drafts(notes, pending, jobs + event_jobs(events, jobs, now_iso), now_iso,
                             names.book(fetch=True), me,
@@ -437,9 +448,20 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
     deliver(ready, cfg, dry_run)
     settled = {} if replay else settle_popups(popups.load(), set(detail), set(notified), closed,
                                               me, tok, cfg)
+    fyis = []
+    if not (replay or seeding or seed_colors):
+        nick = names.book(fetch=True)
+        fyis = approval_fyis(detail, events, groups_now, st.get("mine_groups") or {},
+                             {n[0]["id"] for n in ready}, nick, cfg)
+        fyis += owed_fyis(st, cfg, me, tok, nick, now_iso)
+    st["mine_groups"] = {pid: g for pid, g in {**(st.get("mine_groups") or {}),
+                                               **{k: v["group"] for k, v in groups_now.items()}}.items()
+                         if pid in prs}
     if dry_run:
         for group, why in settled.items():
             print(f"-- would withdraw popup {group}: {why}")
+        for it in fyis:
+            print(f"-- would add FYI ⚪ {it['headline']} ({it['id']})")
         for pid, p in pending.items():
             print(f"[{notified.get(pid, {}).get('color')} · waits for Claude's drafted replies] "
                   f"{p['pr']['repo']}#{p['pr']['number']} · {p['pr']['title']}")
@@ -478,6 +500,9 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
     if settled:
         popups.withdraw(settled, log=lambda m: print(m, flush=True))
         _refetch_menu()
+    for it in fyi.add(fyis, cfg):
+        print(f"{_iso(datetime.now(timezone.utc))} sent fyi: {it['headline']} → "
+              f"{it['pr'].get('url')}", flush=True)
     drafts_pass(cfg)
     _refresh_menu(cfg)
     return 0
@@ -513,6 +538,109 @@ def settle_popups(entries: dict[str, dict], checked: set[str], still_colored: se
             why = popups.review_resolution(e, live.get((e["pr"]["url"] or "").rstrip("/")), me)
             if why:
                 out[g] = why
+    return out
+
+
+def _pr_of(pr: dict) -> dict:
+    return {"url": pr["url"].rstrip("/"), "repo": pr["repo"], "number": pr["number"],
+            "title": pr.get("title") or "", "id": pr.get("id")}
+
+
+def _fyi_item(kind: str, pr: dict, headline: str, row: str, detail: str = "",
+              who: str = "") -> dict:
+    rest = priority.TICKET_RE.sub("", pr.get("title") or "").strip(" []:·-")
+    return {"id": fyi.item_id(kind, pr, who), "kind": kind, "pr": _pr_of(pr),
+            "headline": headline, "row": row, "detail": detail, "subtitle": rest}
+
+
+def approval_fyis(detail: dict[str, dict], events: list[dict], groups_now: dict[str, dict],
+                  groups_before: dict[str, str], delivered: set[str], nick: dict[str, str],
+                  cfg: dict, praise=None) -> list[dict]:
+    """FYIs for this tick's approvals of your PRs (watcher/fyi.py): one per approval
+    that asks nothing (no inline comments, and a body that's empty or only praises),
+    or, when the PR became Ready this tick, one Ready item instead. A PR that got an
+    action popup this tick (`delivered`) gets none: that popup already says it.
+
+    Became Ready: its sub-header is Ready now (`groups_now`, from this tick's
+    classification) and wasn't at the last classification (`groups_before`), or,
+    with no earlier classification, it had fewer than the required approvals before
+    this tick's approvals."""
+    praise = praise or (lambda body: fyi.praise_only(body, cfg))
+    required = cfg["watcher"]["required_approvals"]
+    by_pr: dict[str, list[dict]] = {}
+    for e in events:
+        if e["type"] == "decision" and e.get("state") == "APPROVED":
+            by_pr.setdefault(e["pr"]["id"], []).append(e)
+    out = []
+    for pid, approvals in by_pr.items():
+        pr = detail.get(pid)
+        if not pr or pr["kind"] != "mine" or pid in delivered:
+            continue
+        key = priority.ticket(pr["title"], pr["url"])
+        quiet = [e for e in approvals if not e.get("count") and praise(e.get("body") or "")]
+        now = groups_now.get(pid) or {}
+        before = groups_before.get(pid)
+        if before is None:
+            was_ready = len(pr.get("approved_by") or []) - len(approvals) >= required
+        else:
+            was_ready = before == priority.READY
+        if now.get("group") == priority.READY and not was_ready and len(quiet) == len(approvals):
+            who = priority.names([e["actor"] for e in approvals], nick)
+            out.append(_fyi_item(fyi.READY, pr, f"{key} · {now.get('reason') or 'Ready'}",
+                                 f"{now.get('reason') or 'Ready'} · {who} approved",
+                                 f"{who} approved"))
+            continue
+        for e in quiet:
+            who = priority.who(e["actor"], nick)
+            said = fyi.strip_footer(e.get("body") or "")
+            if said:
+                line = comment_kind.summary(said, 60)
+                out.append(_fyi_item(fyi.APPROVED, pr, f"{who} approved {key}: “{line}”",
+                                     f"{who} approved: “{line}”", who=e["actor"]))
+            else:
+                out.append(_fyi_item(fyi.APPROVED, pr, f"{who} approved {key}, no comment",
+                                     f"{who} approved, no comment", who=e["actor"]))
+    return out
+
+
+def owed_fyis(st: dict, cfg: dict, me: str, tok: str, nick: dict[str, str],
+              now_iso: str) -> list[dict]:
+    """FYIs for reviews you owed that stopped being owed without you: the PR merged or
+    closed, or you were removed as a reviewer (popups.review_outcome). Reads the
+    reviews you owe from the menu's cached triage (review/auto_draft.py
+    classify_owed), once per new fetch, and keeps the last set in `st["owed"]` (url ->
+    {since, title}); the first look only records it. One GraphQL call reads the PRs
+    that left the set. A GitHub error leaves the set as it was, to retry next tick."""
+    from review import auto_draft
+    cache, _ = auto_draft.cached_triage()
+    stamp = cache.get("fetched_at")
+    if not stamp or stamp == st.get("owed_fetched_at") or "reviews" not in cache:
+        return []
+    now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+    owed_now = {e["url"].rstrip("/"): e
+                for e in auto_draft.classify_owed(cache, cfg, [], nick, now_dt, None)}
+    before = st.get("owed")
+    vanished = {u: v for u, v in (before or {}).items() if u not in owed_now}
+    live = {}
+    if vanished:
+        try:
+            live = gh.review_states(list(vanished), me, tok)
+        except gh.GhError as exc:
+            print(f"fyi: couldn't read the reviews no longer owed: {str(exc)[:200]}", flush=True)
+            return []
+    st["owed_fetched_at"] = stamp
+    st["owed"] = {u: (before or {}).get(u) or {"since": now_iso, "title": e.get("title") or ""}
+                  for u, e in owed_now.items()}
+    out = []
+    for url, v in vanished.items():
+        outcome = popups.review_outcome(live.get(url), v.get("since") or "")
+        if not outcome or outcome[0] == "reviewed":
+            continue
+        parts = url.split("/")
+        pr = {"url": url, "repo": parts[-3], "number": int(parts[-1]), "title": v.get("title") or ""}
+        key = priority.ticket(pr["title"], url)
+        out.append(_fyi_item(fyi.NOT_OWED, pr, f"Review no longer needed: {key} · {outcome[1]}",
+                             f"Review no longer needed: {outcome[1]}"))
     return out
 
 

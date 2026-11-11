@@ -166,6 +166,7 @@ def _diff_mine(pr: dict, prev: dict | None, ctx: Ctx) -> tuple[list[dict], dict]
             others = [i for i in comments if i is not decision]
             line = _first_line(decision.get("body") or "") or base["first_line"]
             events.append({**base, "type": "decision", "state": decision["state"],
+                           "body": (decision.get("body") or "")[:2000],
                            "approvals": approvals, "count": len(others),
                            "kinds": [comment_kind.kind(i.get("body") or "") for i in others],
                            "first_line": line,

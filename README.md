@@ -245,6 +245,16 @@ menu refetches at the same moment, so its row goes too. Each withdrawal is logge
 `~/.cache/pr-digest/watcher.log` (`withdrew popup: …`), and what's out is recorded in
 `state/watcher/popups.json` (`watcher/popups.py`).
 
+**FYI (⚪): news that asks nothing of you.** Someone approved your PR with no comment,
+or with praise only ("LGTM 🚀"; anything that might ask for something keeps its usual
+handling, and Claude judges the unclear ones with `[models] fyi`); one of your PRs
+became Ready; or a review you owed is no longer needed because the PR merged or closed
+or you were removed as a reviewer. Each gets one slide-away banner with no sound and a
+⚪ row in the menu's FYI section. Opening the menu marks the rows seen and takes their
+banners out of Notification Center; they're gone the next time you open it (at least
+10 seconds later). They're stored in `state/watcher/fyi.json` (`watcher/fyi.py`) and
+never count in the title.
+
 ### Automatic review drafts
 
 With `[review] auto_draft = true`, the watcher's tick also runs `review/auto_draft.py`:

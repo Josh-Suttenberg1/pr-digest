@@ -29,6 +29,10 @@ at the top explains the dots. Sections, top to bottom:
      - Done for you: ✅, what pr-digest did on its own today (auto-fixes it pushed,
        watcher/autofix.py, and automatic re-approvals), each with its proof in the
        submenu. Never counted; ⌥ dismisses it, and it's gone the next day.
+     - FYI: ⚪, things to know that ask nothing of you (watcher/fyi.py): an approval
+       with no comment or only praise, a PR of yours that became Ready, a review you
+       owed that's no longer needed. Never counted; gone the next time the menu
+       opens after you've seen it.
      - Nothing needed (N): ⚪, every other open PR the GitHub searches or the triage
        turned up, with what happened in words (parked, approved, drafts). Never
        counted.
@@ -850,6 +854,29 @@ def done_rows(entries: list[dict], nick: dict[str, str]) -> None:
         done_block(e, nick, org)
 
 
+def fyi_rows(items: list[dict]) -> None:
+    """FYI: ⚪ things to know that ask nothing of you (watcher/fyi.py), oldest first.
+    Each row opens its PR; it's gone the next time the menu opens."""
+    emit("FYI", color="#888888")
+    for it in items:
+        pr = it.get("pr") or {}
+        if not pr.get("url"):
+            continue
+        emit(row_text({"color": priority.LOW, "title": pr.get("title") or "", "url": pr["url"],
+                       "reason": f"{it.get('row') or it.get('headline') or ''} · {when(it.get('at'))}"}),
+             href=pr["url"], tooltip=sanitize(it.get("headline") or ""))
+
+
+def fyi_items() -> list[dict]:
+    """The FYI rows for this render, marking them seen when the render comes from
+    opening the menu (watcher/fyi.py on_render). Never breaks the menu."""
+    try:
+        from watcher import fyi
+        return fyi.on_render(os.environ.get("SWIFTBAR_PLUGIN_REFRESH_REASON", ""))
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def dismiss_done(spec: str) -> None:
     """Take Done for you rows away: `spec` is a:<id> for auto-fixes and f:<id> for
     re-approvals, comma-separated."""
@@ -1115,6 +1142,9 @@ def others_rows(sections: dict, nick: dict[str, str]) -> None:
     if sections.get("done"):
         print("---")
         done_rows(sections["done"], nick)
+    if sections.get("fyi"):
+        print("---")
+        fyi_rows(sections["fyi"])
     if sections["nothing"]:
         emit(f"{priority.NOTHING_NAME} ({len(sections['nothing'])})", color="#888888")
         for e in sections["nothing"]:
@@ -1393,6 +1423,7 @@ def main() -> int:
                               required, nick, prio=_priority_settings(),
                               autofix_jobs=_autofix_jobs(),
                               drafts=_draft_states(cache) if have_data else None)
+    sections["fyi"] = fyi_items()
     render_menu(sections, spinner=fetching, error=cache.get("error"),
                 have_data=have_data, nick=nick, required=required)
     return 0

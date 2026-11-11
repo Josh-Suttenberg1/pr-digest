@@ -251,15 +251,18 @@ def review_states_query(urls: list[str], me: str) -> tuple[str, dict[str, str], 
         decls += [f"$o{i}: String!", f"$r{i}: String!", f"$n{i}: Int!"]
         variables.update({f"o{i}": owner, f"r{i}": repo, f"n{i}": number})
         parts.append(f"p{i}: repository(owner: $o{i}, name: $r{i}) {{ pullRequest(number: $n{i}) {{ "
-                     f"state reviews(last: 30, author: $me) {{ nodes {{ state submittedAt body }} }} }} }}")
+                     f"state reviews(last: 30, author: $me) {{ nodes {{ state submittedAt body }} }} "
+                     f"reviewRequests(first: 30) {{ nodes {{ requestedReviewer {{ "
+                     f"__typename ... on User {{ login }} }} }} }} }} }}")
         alias_url[f"p{i}"] = url.rstrip("/")
     query = f"query({', '.join(decls)}) {{ {' '.join(parts)} }}"
     return query, alias_url, variables
 
 
 def review_states(urls: list[str], me: str, tok: str) -> dict[str, dict]:
-    """PR url -> {state, reviews: [{state, submitted_at, body}]} (your reviews only), for
-    watcher/popups.py review_resolution. A PR that couldn't be read is left out."""
+    """PR url -> {state, reviews: [{state, submitted_at, body}] (your reviews only),
+    requested (`_requested`)}, for watcher/popups.py review_outcome. A PR that
+    couldn't be read is left out."""
     query, alias_url, variables = review_states_query(urls, me)
     if not alias_url:
         return {}
@@ -271,5 +274,18 @@ def review_states(urls: list[str], me: str, tok: str) -> dict[str, dict]:
             out[url] = {"state": pr.get("state"),
                         "reviews": [{"state": r.get("state"), "submitted_at": r.get("submittedAt"),
                                      "body": r.get("body") or ""}
-                                    for r in (pr.get("reviews") or {}).get("nodes") or []]}
+                                    for r in (pr.get("reviews") or {}).get("nodes") or []],
+                        "requested": _requested(pr, me)}
     return out
+
+
+def _requested(pr: dict, me: str) -> bool | None:
+    """Whether your review is requested now: True when you're requested by name,
+    None when you aren't but a team is (you may be on it), False otherwise."""
+    reviewers = [(n or {}).get("requestedReviewer") or {}
+                 for n in (pr.get("reviewRequests") or {}).get("nodes") or []]
+    if any(r.get("login") == me for r in reviewers):
+        return True
+    if any(r.get("__typename") == "Team" for r in reviewers):
+        return None
+    return False

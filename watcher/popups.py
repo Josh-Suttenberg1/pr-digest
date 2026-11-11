@@ -14,12 +14,14 @@ its notification group:
             menu row. A stale wait (🟡, a cue to nudge) is a color, so its popup stays
             until the review arrives.
   review    a review you owe (review/auto_draft.py, review/review_pr.py --notify).
-            Resolved once you submit a review (approve, request changes, or comment
-            with a body) after `since`, the moment the request was first seen.
+            Resolved once you review it after `since`, the moment the request was
+            first seen, or are removed as a reviewer (`review_outcome`).
   autofix   a fix that escalated (watcher/autofix.py). Resolved once the job is no
             longer escalated: the thread was answered or resolved, or the job dismissed.
+  fyi       something to know, nothing to do (watcher/fyi.py). Withdrawn by the menu
+            once you've seen its row, never by the watcher.
 
-Any kind is resolved once its PR merges or closes. Clicking a popup or a menu link
+Any kind but fyi is resolved once its PR merges or closes. Clicking a popup or a menu link
 resolves nothing by itself.
 
 The watcher re-checks every PR with a popup out on every tick (`watched_ids`,
@@ -47,7 +49,7 @@ import notify  # noqa: E402
 import settings  # noqa: E402
 
 PATH = settings.STATE_DIR / "watcher" / "popups.json"
-PR, REVIEW, AUTOFIX = "pr", "review", "autofix"
+PR, REVIEW, AUTOFIX, FYI = "pr", "review", "autofix", "fyi"
 
 
 def _now() -> str:
@@ -85,6 +87,8 @@ def group_for(kind: str, repo: str = "", number: int | str = "", job: str = "") 
     one per job for an auto-fix, so resolving one never withdraws another."""
     if kind == AUTOFIX:
         return f"autofix-{job}"
+    if kind == FYI:
+        return f"fyi-{job}"
     return f"{'pr' if kind == PR else 'review'}-{repo}-{number}"
 
 
@@ -157,10 +161,12 @@ def resolved_rows(entries: dict[str, dict], checked: set[str], still_colored: se
 
 
 def resolved_closed(entries: dict[str, dict], closed: dict[str, str]) -> dict[str, str]:
-    """Popups of any kind whose PR merged or closed. `closed` maps a PR's node id or
+    """Popups of any kind but fyi whose PR merged or closed. `closed` maps a PR's node id or
     url to its state (MERGED or CLOSED)."""
     out = {}
     for g, e in entries.items():
+        if e.get("kind") == FYI:
+            continue
         pr = e.get("pr") or {}
         state = closed.get(pr.get("id") or "") or closed.get((pr.get("url") or "").rstrip("/"))
         if state:
@@ -168,24 +174,36 @@ def resolved_closed(entries: dict[str, dict], closed: dict[str, str]) -> dict[st
     return out
 
 
-def review_resolution(entry: dict, live: dict | None, me: str) -> str | None:
-    """Why a review-owed popup is resolved, or None. `live` is the PR's state and your
-    reviews ({state, reviews: [{state, submitted_at, body}]}); None when it couldn't be
-    read, which never resolves anything. A review counts when it approves, requests
-    changes, or comments with a body, as in followup.cleared_jobs: a bare reply in
-    someone's thread is recorded as an empty COMMENTED review and doesn't count, and
-    a dismissed review is owed again."""
+def review_outcome(live: dict | None, since: str) -> tuple[str, str] | None:
+    """What became of a review you owed, from `live` (watcher/gh.py review_states):
+    ("closed", "the PR merged"), ("reviewed", "you reviewed it"), ("removed", "you
+    were removed as a reviewer"), or None while it's still owed or couldn't be read.
+
+    A review after `since` counts when it approves, requests changes, or comments with
+    a body, as in followup.cleared_jobs: a bare reply in someone's thread is recorded
+    as an empty COMMENTED review and doesn't count, and a dismissed review is owed
+    again. A review of inline comments alone also counts once GitHub has dropped your
+    review request, which it does on a real review and never on a thread reply."""
     if not live:
         return None
     if live.get("state") in ("MERGED", "CLOSED"):
-        return f"the PR {live['state'].lower()}"
-    since = entry.get("since") or entry.get("sent_at") or ""
-    for r in live.get("reviews") or []:
-        counts = (r.get("state") in ("APPROVED", "CHANGES_REQUESTED")
-                  or (r.get("state") == "COMMENTED" and (r.get("body") or "").strip()))
-        if counts and (r.get("submitted_at") or "") >= since:
-            return "you reviewed it"
+        return "closed", f"the PR {live['state'].lower()}"
+    mine = [r for r in live.get("reviews") or [] if (r.get("submitted_at") or "") >= since]
+    if any(r.get("state") in ("APPROVED", "CHANGES_REQUESTED")
+           or (r.get("state") == "COMMENTED" and (r.get("body") or "").strip()) for r in mine):
+        return "reviewed", "you reviewed it"
+    if live.get("requested") is False:
+        if any(r.get("state") == "COMMENTED" for r in mine):
+            return "reviewed", "you reviewed it"
+        return "removed", "you were removed as a reviewer"
     return None
+
+
+def review_resolution(entry: dict, live: dict | None, me: str) -> str | None:
+    """Why a review-owed popup is resolved (`review_outcome` from when the request was
+    first seen, else from when the popup went out), or None."""
+    out = review_outcome(live, entry.get("since") or entry.get("sent_at") or "")
+    return out[1] if out else None
 
 
 def autofix_resolution(entry: dict, job: dict | None) -> str | None:
