@@ -45,7 +45,8 @@ Every PR lands in exactly one section, with at most one color:
   others: the author is still working.
 
   Reviews you owe (`OWED`), others' PRs you haven't reviewed, or whose review of yours
-  was dismissed:
+  was dismissed. A teammate's PR (`[triage] team`, `team_pr`) is one of them whether or
+  not GitHub requests you, from when it was ready for review:
     yellow   stalled: waiting on you more than `stale_after_days` (calendar hours,
              weekends included, from reviews._waiting_since), fewer than `required`
              approvals, and at most `max_engaged` people other than the author and bots
@@ -149,6 +150,24 @@ def ticket(title: str, url: str) -> str:
         return m.group(0)
     parts = (url or "").rstrip("/").split("/")
     return f"{parts[-3]}#{parts[-1]}" if len(parts) >= 3 else url
+
+
+def team_pr(author: str, title: str, team, tickets) -> bool:
+    """A teammate's PR that counts as asking for your review whether or not GitHub
+    requests you (`[triage] team`): its author is in `team` and, when `tickets` names
+    any Jira project keys, its title carries one of them as a ticket key (the project
+    key, a dash and a number)."""
+    if not author or author not in set(team or ()):
+        return False
+    keys = [k for k in tickets or () if k]
+    return not keys or any(re.search(rf"\b{re.escape(k)}-\d+\b", title or "") for k in keys)
+
+
+def team_search(org: str, me: str, team) -> str:
+    """The GitHub search for your teammates' open, non-draft PRs. Repeated `author:`
+    qualifiers match any of them. '' when there's no team."""
+    authors = " ".join(f"author:{a}" for a in sorted(set(team or ())) if a and a != me)
+    return f"is:pr is:open org:{org} draft:false {authors}" if authors else ""
 
 
 def _parse(stamp) -> datetime | None:
@@ -569,7 +588,13 @@ def owed(st: dict, nick: dict[str, str], now: datetime, *, required: int = 2,
     label = {RED: "red", YELLOW: "yellow", GREEN: "green"}[color]
     lead = (f"{who(st.get('author') or '', nick)} is in your pod, so you review it first · "
             if pod else "")
-    why = f"Why it's {label}: {lead}requested {asked} · {approvals} · {people}"
+    if st.get("team_ask"):
+        lead += (f"{who(st.get('author') or '', nick)} is your teammate, so it counts as "
+                 f"asking you though GitHub doesn't request you · ")
+        asked_words = f"ready for review {asked}"
+    else:
+        asked_words = f"requested {asked}"
+    why = f"Why it's {label}: {lead}{asked_words} · {approvals} · {people}"
     dismissed = bool(dismissed_at and since and since <= dismissed_at)
     if dismissed:
         return {"section": OWED, "color": None, "reason": f"Dismissed · {reason}",

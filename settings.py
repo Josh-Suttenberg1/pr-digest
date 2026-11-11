@@ -66,6 +66,11 @@ DEFAULTS: dict = {
         # Your pod: their review requests are red from the start and stay red until
         # you've reviewed (triage/priority.py owed), and rank higher in the list.
         "pod": [],
+        # Your teammates: their PRs count as review requests to you even when GitHub
+        # doesn't request you (triage/reviews.py candidates), in the menu and in the
+        # popups. Only PRs whose title carries a key from team_tickets, unless it's empty.
+        "team": [],
+        "team_tickets": ["WS", "CONN"],
         # Check names (case-insensitive substrings) whose failure doesn't park a PR.
         "ci_ignored": [],
     },

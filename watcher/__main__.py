@@ -471,8 +471,9 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
                             required=cfg["watcher"]["required_approvals"],
                             still_colored=set(notified))
     deliver(ready, cfg, dry_run)
+    owed_urls = set(st["owed"]) if isinstance(st.get("owed"), dict) else None
     settled = {} if replay else settle_popups(popups.load(), set(detail), set(notified), closed,
-                                              me, tok, cfg)
+                                              me, tok, cfg, owed=owed_urls)
     fyis = []
     if not (replay or seeding or seed_colors):
         nick = names.book(fetch=True)
@@ -537,12 +538,14 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
 
 
 def settle_popups(entries: dict[str, dict], checked: set[str], still_colored: set[str],
-                  closed: dict[str, str], me: str, tok: str, cfg: dict) -> dict[str, str]:
+                  closed: dict[str, str], me: str, tok: str, cfg: dict,
+                  owed: set[str] | None = None) -> dict[str, str]:
     """group -> why, for each popup whose item is done (watcher/popups.py): its PR
     merged or closed; a PR row classified this tick (`checked`) has no color left
     (`still_colored`, the PR ids in `notified`); an escalated auto-fix isn't escalated
     any more; or you reviewed a PR whose review-owed popup is out, which one GraphQL
-    call reads for all of them."""
+    call reads for all of them, or (a teammate's PR) it left `owed`, the reviews you
+    owe as of the last menu fetch (`st["owed"]`, kept by `owed_fyis`)."""
     out = popups.resolved_closed(entries, closed)
     out.update({g: w for g, w in popups.resolved_rows(entries, checked, still_colored).items()
                 if g not in out})
@@ -563,7 +566,8 @@ def settle_popups(entries: dict[str, dict], checked: set[str], still_colored: se
             print(f"popups: couldn't read review states: {str(exc)[:200]}", flush=True)
             live = {}
         for g, e in reviews.items():
-            why = popups.review_resolution(e, live.get((e["pr"]["url"] or "").rstrip("/")), me)
+            why = popups.review_resolution(e, live.get((e["pr"]["url"] or "").rstrip("/")), me,
+                                           owed)
             if why:
                 out[g] = why
     return out
@@ -637,8 +641,11 @@ def owed_fyis(st: dict, cfg: dict, me: str, tok: str, nick: dict[str, str],
     closed, or you were removed as a reviewer (popups.review_outcome). Reads the
     reviews you owe from the menu's cached triage (review/auto_draft.py
     classify_owed), once per new fetch, and keeps the last set in `st["owed"]` (url ->
-    {since, title}); the first look only records it. One GraphQL call reads the PRs
-    that left the set. A GitHub error leaves the set as it was, to retry next tick."""
+    {since, title, team}); the first look only records it. One GraphQL call reads the
+    PRs that left the set. A GitHub error leaves the set as it was, to retry next tick.
+    A teammate's PR (`team`, triage/priority.py team_pr) never requested you, so for it
+    only the PR closing counts: leaving the set otherwise (approvals in, a change
+    request waiting on the author) is no news."""
     from review import auto_draft
     cache, _ = auto_draft.cached_triage()
     stamp = cache.get("fetched_at")
@@ -657,11 +664,12 @@ def owed_fyis(st: dict, cfg: dict, me: str, tok: str, nick: dict[str, str],
             print(f"fyi: couldn't read the reviews no longer owed: {str(exc)[:200]}", flush=True)
             return []
     st["owed_fetched_at"] = stamp
-    st["owed"] = {u: (before or {}).get(u) or {"since": now_iso, "title": e.get("title") or ""}
+    st["owed"] = {u: {**((before or {}).get(u) or {"since": now_iso, "title": e.get("title") or ""}),
+                      "team": bool((e.get("st") or {}).get("team_ask"))}
                   for u, e in owed_now.items()}
     out = []
     for url, v in vanished.items():
-        outcome = popups.review_outcome(live.get(url), v.get("since") or "")
+        outcome = popups.review_outcome(live.get(url), v.get("since") or "", bool(v.get("team")))
         if not outcome or outcome[0] == "reviewed":
             continue
         parts = url.split("/")
@@ -702,13 +710,16 @@ def plan_answers(detail: dict[str, dict], groups_now: dict[str, dict], jobs: lis
 
 
 def drafts_pass(cfg: dict, dry_run: bool = False, **kw) -> list[dict]:
-    """The automatic review drafts' pass (review/auto_draft.py tick), while `[review]
-    auto_draft` is on. A failure is logged and never stops the watcher."""
+    """The review-request pass: while `[review] auto_draft` is on, the automatic
+    drafts (review/auto_draft.py tick), whose popups come with each draft; while it's
+    off, a popup for each new review you owe, with no draft (auto_draft.announce). A
+    failure is logged and never stops the watcher."""
     from review import auto_draft
-    if not auto_draft.enabled(cfg):
-        return []
+    log = lambda m: print(m, flush=True)  # noqa: E731
     try:
-        return auto_draft.tick(cfg, dry_run, log=lambda m: print(m, flush=True), **kw)
+        if auto_draft.enabled(cfg):
+            return auto_draft.tick(cfg, dry_run, log=log, **kw)
+        return auto_draft.announce(cfg, dry_run, log=log)
     except Exception as exc:  # noqa: BLE001
         print(f"drafts: the pass failed: {str(exc)[:200]}", flush=True)
         return []

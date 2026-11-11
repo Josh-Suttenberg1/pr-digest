@@ -31,6 +31,15 @@ The menu row and the notification arrive together, once the row has a draft stat
 `fallback_minutes` after the request was seen, no draft. Until then the review is
 hidden: no row, no count, no popup. A review is announced once; an update finishing
 turns the row back to "draft ready" without another popup.
+
+While auto_draft is off, `announce` pops up each review you owe once, as soon as the
+cached triage has it, with no draft: the same notification, linking to the PR. Its
+first pass records every review already owed without a popup, so switching it on
+doesn't send a burst. Both paths mark a review announced in its scheduling state, so
+turning auto_draft on later never announces a review twice.
+
+A teammate's PR (`[triage] team`, triage/priority.py team_pr) counts as a review
+request here exactly as one that names you.
 """
 
 from __future__ import annotations
@@ -56,6 +65,10 @@ MANUAL_STATE = settings.REPO_DIR / "review-drafter" / "state"   # inflight-<repo
 CACHE_MAX_AGE = 15 * 60
 # A cached triage that lacks a PR requesting your review is refreshed once it's this old.
 NEW_REQUEST_AGE = 5 * 60
+
+# A file in DRAFTS_STATE, present once `announce` has recorded the reviews already owed
+# when it first ran.
+ANNOUNCE_SEEDED = ".announce-seeded"
 
 READY, OUTDATED, FAILED, NO_DRAFT = "draft ready", "draft outdated", "draft failed", "no draft"
 
@@ -287,18 +300,30 @@ def owes_draft(st: dict, cfg: dict) -> bool:
 
 def requested_heads(cfg: dict) -> dict[str, dict]:
     """PR url -> {head, base, title, author} for every open PR requesting your review,
-    from one GraphQL search."""
+    and every teammate's PR that counts as one (priority.team_pr), from a GraphQL
+    search each."""
     from watcher import gh
-    q = (f"is:pr is:open org:{cfg['org']} review-requested:{cfg['me']} "
-         f"-author:{cfg['me']} draft:false")
-    data, _ = gh.graphql(REQUESTED_QUERY, {"q": q}, gh.token())
+    tri = cfg.get("triage") or {}
+    team, tickets = tri.get("team") or (), tri.get("team_tickets") or ()
+    queries = [(f"is:pr is:open org:{cfg['org']} review-requested:{cfg['me']} "
+                f"-author:{cfg['me']} draft:false", False),
+               (priority.team_search(cfg["org"], cfg["me"], team), True)]
+    tok = gh.token()
     out = {}
-    for n in (data.get("search") or {}).get("nodes") or []:
-        if n and n.get("url"):
-            out[n["url"].rstrip("/")] = {"head": (n.get("headRefOid") or "").lower(),
-                                         "base": n.get("baseRefName") or "main",
-                                         "title": n.get("title") or "",
-                                         "author": (n.get("author") or {}).get("login", "")}
+    for q, teammates in queries:
+        if not q:
+            continue
+        data, _ = gh.graphql(REQUESTED_QUERY, {"q": q}, tok)
+        for n in (data.get("search") or {}).get("nodes") or []:
+            if not n or not n.get("url"):
+                continue
+            author = (n.get("author") or {}).get("login", "")
+            if teammates and not priority.team_pr(author, n.get("title") or "", team, tickets):
+                continue
+            out.setdefault(n["url"].rstrip("/"), {
+                "head": (n.get("headRefOid") or "").lower(),
+                "base": n.get("baseRefName") or "main",
+                "title": n.get("title") or "", "author": author})
     return out
 
 
@@ -478,6 +503,71 @@ def run_job(key: str, cfg: dict, state_dir: Path | None = None,
 # --- the tick ----------------------------------------------------------------------------
 
 
+def _fresh_triage(cfg: dict, dry_run: bool, log) -> tuple[dict, dict[str, dict]]:
+    """The cached triage, and the live requests (`requested_heads`). Starts a refresh
+    of the cache when it's older than CACHE_MAX_AGE, or when it lacks a live request
+    and is older than NEW_REQUEST_AGE (a PR the triage leaves out, closed meanwhile,
+    stays unknown, so that refresh is rate-limited)."""
+    cache, age = cached_triage()
+    live: dict[str, dict] = {}
+    try:
+        live = requested_heads(cfg)
+    except Exception as exc:  # noqa: BLE001 — the cached heads still work
+        log(f"drafts: couldn't read requested PRs: {str(exc)[:120]}")
+    known = {(st.get("pr_url") or "").rstrip("/") for b in (cache.get("reviews") or {}).values()
+             for st in b}
+    unknown = bool(set(live) - known) and (age is None or age > NEW_REQUEST_AGE)
+    if not cache.get("reviews") or age is None or age > CACHE_MAX_AGE or unknown:
+        if not dry_run and refresh_triage():
+            log("drafts: refreshing the cached triage")
+    return cache, live
+
+
+def announce(cfg: dict, dry_run: bool = False, *, now: float | None = None, deliver=None,
+             log=print) -> list[dict]:
+    """While auto_draft is off: the notification for each review you owe that hasn't
+    had one, sent now with no draft ({pr, color, reason, state, draft, url, key,
+    team}). The first pass ever (no ANNOUNCE_SEEDED file) records every review already owed
+    as announced and sends nothing. `deliver(notes)` sends them (default:
+    notify_reviews)."""
+    from watcher import followup
+    import names
+    now = time.time() if now is None else now
+    cache, live = _fresh_triage(cfg, dry_run, log)
+    if not cache.get("reviews"):
+        return []
+    mark = DRAFTS_STATE / ANNOUNCE_SEEDED
+    seeded = mark.exists()
+    nick = names.book(fetch=False)
+    now_dt = datetime.fromtimestamp(now, timezone.utc)
+    sts = {st["pr_url"].rstrip("/"): st for st in candidates(cache) if st.get("pr_url")}
+    jobs = all_jobs()
+    notes = []
+    for e in classify_owed(cache, cfg, followup.all_jobs(), nick, now_dt, None):
+        url = e["url"].rstrip("/")
+        st = sts.get(url)
+        key = pr_key(url)
+        job = jobs.get(key)
+        if not st or not e.get("color") or (job and job.get("announced_at")):
+            continue
+        job = job or {"key": key, "seen_at": int(now), "status": "idle"}
+        job["pr"] = pr_info(st, live.get(url))
+        job.update(announced_at=int(now), announced_state=None)
+        if seeded:
+            notes.append({"pr": job["pr"], "color": e["color"], "reason": e["reason"],
+                          "state": None, "draft": None, "url": url, "key": key,
+                          "team": bool(st.get("team_ask"))})
+        if not dry_run:
+            save_job(job)
+            jobs[key] = job
+    if not seeded and not dry_run:
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        mark.touch()
+    if notes:
+        (deliver or (lambda ns: notify_reviews(ns, cfg, dry_run, log, jobs=jobs)))(notes)
+    return notes
+
+
 def tick(cfg: dict, dry_run: bool = False, *, now: float | None = None, limit: int | None = None,
          only: str | None = None, deliver=None, log=print) -> list[dict]:
     """One scheduling pass. Starts drafts and updates, carries drafts forward, and
@@ -489,20 +579,7 @@ def tick(cfg: dict, dry_run: bool = False, *, now: float | None = None, limit: i
     import names
     now = time.time() if now is None else now
     rcfg = cfg["review"]
-    cache, age = cached_triage()
-    live: dict[str, dict] = {}
-    try:
-        live = requested_heads(cfg)
-    except Exception as exc:  # noqa: BLE001 — the cached heads still work
-        log(f"drafts: couldn't read requested PRs: {str(exc)[:120]}")
-    known = {(st.get("pr_url") or "").rstrip("/") for b in (cache.get("reviews") or {}).values()
-             for st in b}
-    # A request the cached triage hasn't seen refreshes it, at most every NEW_REQUEST_AGE,
-    # since a PR the triage leaves out (closed meanwhile) stays unknown.
-    unknown = bool(set(live) - known) and (age is None or age > NEW_REQUEST_AGE)
-    if not cache.get("reviews") or age is None or age > CACHE_MAX_AGE or unknown:
-        if not dry_run and refresh_triage():
-            log("drafts: refreshing the cached triage")
+    cache, live = _fresh_triage(cfg, dry_run, log)
     if not cache.get("reviews"):
         return []
 
@@ -577,7 +654,7 @@ def tick(cfg: dict, dry_run: bool = False, *, now: float | None = None, limit: i
         draft = (rec or {}).get("story") or (rec or {}).get("draft")
         notes.append({"pr": job["pr"], "color": e["color"], "reason": e["reason"],
                       "state": state, "draft": draft if state in (READY, OUTDATED) else None,
-                      "url": url, "key": key})
+                      "url": url, "key": key, "team": bool((sts.get(url) or {}).get("team_ask"))})
         if not dry_run:
             job.update(announced_at=int(now), announced_state=state)
             save_job(job)
@@ -592,13 +669,20 @@ def notify_reviews(notes: list[dict], cfg: dict, dry_run: bool = False, log=prin
     rest slide away) with its sound, recorded by watcher/popups.py so it's withdrawn
     once you've reviewed the PR. `jobs` (key -> scheduling state) gives each its
     `since`, when the request was first seen. Clicking opens the draft as a page
-    (review/view_draft.py), or the PR when there's no draft."""
+    (review/view_draft.py), or the PR when there's no draft. A teammate's PR that
+    doesn't request you (`team`) says so in its title, and its popup is withdrawn once
+    it stops waiting on you rather than when a request is dropped (watcher/popups.py)."""
     import names
     from watcher import popups
     nick = names.book(fetch=True)
     for n in sorted(notes, key=lambda n: -priority.rank(n["color"])):
         pr = n["pr"]
-        title = f"{priority.dot(n['color'])} {priority.who(pr['author'], nick)} asked you to review {pr['key']}"
+        if n.get("team"):
+            title = (f"{priority.dot(n['color'])} Review "
+                     f"{priority._possessive(pr['author'], nick)} {pr['key']}")
+        else:
+            title = (f"{priority.dot(n['color'])} {priority.who(pr['author'], nick)} "
+                     f"asked you to review {pr['key']}")
         sub = priority.TICKET_RE.sub("", pr.get("title") or "").strip(" []:·-") or pr["key"]
         href = pr["url"]
         if n.get("draft"):
@@ -614,6 +698,7 @@ def notify_reviews(notes: list[dict], cfg: dict, dry_run: bool = False, log=prin
         since = (datetime.fromtimestamp(seen, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                  if seen else None)
         popups.send(popups.REVIEW, {**pr, "url": n.get("url") or pr.get("url")}, n["color"],
-                    title, sub, n["reason"], cfg, href=href, since=since)
+                    title, sub, n["reason"], cfg, href=href, since=since,
+                    team=bool(n.get("team")))
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         log(f"{stamp} sent review: {title} | {sub} | {n['reason']} → {href}")

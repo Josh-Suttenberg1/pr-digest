@@ -62,6 +62,12 @@ model = ""                       # "" uses [models] followup
 # Your pod's GitHub logins. Their review requests are red from the start and stay red
 # until you've reviewed, even once others approve.
 pod = []
+# Your teammates' GitHub logins. Their PRs count as review requests to you even when
+# GitHub doesn't request you: a menu row and a popup, like any request. Only PRs whose
+# title carries a key from team_tickets (the project key, a dash, a number); [] counts
+# every PR they open.
+team = []
+team_tickets = ["WS", "CONN"]
 
 [jira]
 # PRs for sub-tasks of one Jira ticket show as one group in the menu, titled with the

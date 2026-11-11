@@ -1,7 +1,9 @@
 """Reviews you owe: a live GitHub triage of every PR that could be on your plate.
 
 Candidates are every open, non-draft PR (not your own) that requests your review —
-directly or via one of your teams — or that you have reviewed before. For each, every
+directly or via one of your teams — that a teammate (`[triage] team`) opened, or that
+you have reviewed before. A teammate's PR counts as asking for your review whether or
+not GitHub requests you (`team_ask` on its state). For each, every
 reviewer's standing decision is their latest APPROVED / CHANGES_REQUESTED / DISMISSED
 review; a COMMENTED review never overrides an approval. Then, in this order:
 
@@ -32,7 +34,8 @@ merge whose resolution writes or drops its own code still counts. Telling those 
 needs the repo cloned under `repos_root`; without a clone every commit counts.
 
 Configuration comes from settings (`org`, `repos_root`, `watcher.required_approvals`,
-`triage.pod`, `triage.ci_ignored`) through `configure()`, which runs at
+`triage.pod`, `triage.team`, `triage.team_tickets`, `triage.ci_ignored`) through
+`configure()`, which runs at
 import. Read-only against GitHub; it may fetch a PR's commit objects into the local
 clone's object store (no branch, index, worktree or FETCH_HEAD change).
 """
@@ -49,6 +52,7 @@ from pathlib import Path
 
 import names
 import settings
+from triage import priority
 
 ORG = "avetta"
 REPOS_ROOT = Path.home()
@@ -58,6 +62,10 @@ WELL_APPROVED = 2
 # Authors whose PRs rank higher: same-pod work ships together, so a review stalled on
 # you stalls your own pod.
 POD: set[str] = set()
+# Teammates whose PRs count as asking for your review (priority.team_pr), and the Jira
+# project keys such a PR's title must carry (none: any title).
+TEAM: set[str] = set()
+TEAM_TICKETS: tuple[str, ...] = ()
 # Checks whose failure says nothing about whether the author is done (matched as a
 # case-insensitive substring of the check name).
 CI_IGNORED: tuple[str, ...] = ()
@@ -82,13 +90,15 @@ _FETCH_LOCKS_GUARD = threading.Lock()
 
 def configure(cfg: dict | None = None) -> None:
     """Set the module's knobs from a settings dict (default: settings.load())."""
-    global ORG, REPOS_ROOT, WELL_APPROVED, POD, CI_IGNORED, NAMES, BOTS
+    global ORG, REPOS_ROOT, WELL_APPROVED, POD, TEAM, TEAM_TICKETS, CI_IGNORED, NAMES, BOTS
     cfg = cfg if cfg is not None else settings.load()
     ORG = cfg.get("org") or ORG
     REPOS_ROOT = settings.path_of(cfg.get("repos_root") or cfg.get("workspace") or str(REPOS_ROOT))
     WELL_APPROVED = int((cfg.get("watcher") or {}).get("required_approvals", WELL_APPROVED))
     tri = cfg.get("triage") or {}
     POD = set(tri.get("pod") or [])
+    TEAM = set(tri.get("team") or [])
+    TEAM_TICKETS = tuple(tri.get("team_tickets") or ())
     CI_IGNORED = tuple(s.lower() for s in tri.get("ci_ignored") or [])
     NAMES = names.book(fetch=True)
     BOTS = {b.lower() for b in (cfg.get("watcher") or {}).get("bots") or []}
@@ -279,9 +289,10 @@ def _new_work_since(owner_repo: str, pr_number, approved_sha: str, head: str,
 
 def candidates(me: str, teams: list[str]) -> dict[str, dict]:
     """Every open, non-draft PR that could be on your plate: GitHub requests your
-    review (directly or via one of your teams), or you have reviewed it before. Your
-    own PRs are excluded. Keyed by PR url. A GitHub draft PR is never a candidate — it
-    is not ready for review by definition."""
+    review (directly or via one of your teams), a teammate opened it with a ticket key
+    in its title (priority.team_pr), or you have reviewed it before. Your own PRs are
+    excluded. Keyed by PR url. A GitHub draft PR is never a candidate — it is not ready
+    for review by definition."""
     found: dict[str, dict] = {}
     queries = [["--review-requested=@me"], ["--reviewed-by=@me"]]
     queries += [[f"team-review-requested:{ORG}/{t}"] for t in teams]
@@ -295,7 +306,33 @@ def candidates(me: str, teams: list[str]) -> dict[str, dict]:
             if not url or pr.get("isDraft") or (me and author.lower() == me.lower()):
                 continue
             found.setdefault(url, pr)
+    for url, pr in _team_candidates(me).items():
+        found.setdefault(url, pr)
     return found
+
+
+def _team_candidates(me: str) -> dict[str, dict]:
+    """Your teammates' open, non-draft PRs that count as asking for your review
+    (priority.team_pr), shaped like `gh search prs` results. The REST search API is
+    used because it matches any of several `author:` qualifiers, which `gh search prs`
+    doesn't."""
+    q = priority.team_search(ORG, me, TEAM)
+    if not q:
+        return {}
+    got = _gh_json(["gh", "api", "-X", "GET", "search/issues", "-f", f"q={q}",
+                    "-f", "per_page=100"])
+    out = {}
+    for item in (got or {}).get("items") or [] if isinstance(got, dict) else []:
+        url = (item.get("html_url") or "").rstrip("/")
+        author = (item.get("user") or {}).get("login", "")
+        title = item.get("title") or ""
+        if (not url or item.get("draft") or author.lower() == (me or "").lower()
+                or not priority.team_pr(author, title, TEAM, TEAM_TICKETS)):
+            continue
+        repo = "/".join((item.get("repository_url") or "").rstrip("/").split("/")[-2:])
+        out[url] = {"url": url, "title": title, "author": {"login": author},
+                    "repository": {"nameWithOwner": repo}, "isDraft": False}
+    return out
 
 
 def _review_state(url: str, pr: dict, me: str, teams: list[str]) -> dict | None:
@@ -338,6 +375,7 @@ def _review_state(url: str, pr: dict, me: str, teams: list[str]) -> dict | None:
     requested = requested_direct or any((t or {}).get("slug") in teams
                                         for t in pull.get("requested_teams") or [])
     title = pull.get("title") or pr.get("title") or ""
+    team_ask = not requested and priority.team_pr(author, title, TEAM, TEAM_TICKETS)
     return {
         "pr_url": url,
         "pr_number": num,
@@ -362,6 +400,7 @@ def _review_state(url: str, pr: dict, me: str, teams: list[str]) -> dict | None:
         "teams": teams,
         "requested": requested,
         "requested_direct": requested_direct,
+        "team_ask": team_ask,
     }
 
 
@@ -626,7 +665,7 @@ def _rank(st: dict) -> None:
     because they already carry WELL_APPROVED approvals and wait on another reviewer's
     change request, or because CI is failing. Score within a tier: your own change
     request blocking the merge +4, your review requested of you personally (not just a
-    team) +3, your approval would be the last one needed +2, the author is in POD +2,
+    team), or a teammate's PR that doesn't request you (`team_ask`), +3, your approval would be the last one needed +2, the author is in POD +2,
     a current draft found blockers (feedback is ready to post) +1, a diff of at most
     QUICK_LINES changed lines +1, and half a point per day waited, up to MAX_WAIT_DAYS."""
     mine = (st["mine"] or ("", ""))[0]
@@ -645,6 +684,9 @@ def _rank(st: dict) -> None:
     if st["requested_direct"]:
         score += 3
         tags.append("re-requested you" if _is_rereview(st) else "asked you directly")
+    elif st.get("team_ask"):
+        score += 3
+        tags.append("your teammate's PR")
     elif st["requested"]:
         tags.append("team request")
     if n == WELL_APPROVED - 1 and not parked:

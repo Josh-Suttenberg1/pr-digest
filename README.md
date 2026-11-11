@@ -106,6 +106,7 @@ if you want them, Claude reviews and automatic re-approval. macOS only.
 | `repos_root` | Only if your clones live somewhere other than the workspace. |
 | `[review] reviewer_agent` | Your review agent's name. `""` turns reviews off. |
 | `[review] verifier_agent` | An agent that checks the reviewer's findings before you see them. `""` skips it. |
+| `[triage] team` | Your teammates' GitHub logins. Their PRs count as review requests to you even when GitHub doesn't request you: a row under Needs you and a popup, like any request. Only PRs whose title carries a key from `team_tickets` (`["WS", "CONN"]`; `[]` counts every PR). |
 | `[review] auto_draft` | Off by default. When on, every review you owe gets a draft without being asked, and the draft updates itself when the author pushes (see "Automatic review drafts"). |
 | `[watcher] auto_reapprove` | Off by default. When on, it re-approves a PR you approved once the author has done everything your comments asked and no blocking comment or change request from anyone is left unanswered. The follow-up's menu entry says what's holding it otherwise. |
 | `[notify] sounds` | `false` makes every notification silent. |
@@ -176,7 +177,8 @@ sections, and each PR appears in exactly one:
        with their drafted replies (Post / Edit first / Read Claude's follow-up /
        Dismiss), then **Post the drafted replies** and the review draft's actions.
      - A review you owe is a PR you haven't reviewed yet (or whose review of yours was
-       dismissed). 🟡 when stalled: waiting more than `[priority] stale_after_days`,
+       dismissed): one that requests you, or a teammate's (`[triage] team`) that
+       doesn't, counted from when it was ready for review. 🟡 when stalled: waiting more than `[priority] stale_after_days`,
        under the required approvals, and at most `max_engaged_for_stale` others
        engaged. 🟢 otherwise. Each row has its review draft's status and actions.
        With `[review] auto_draft` on, the row names who approved and the draft's
@@ -221,8 +223,13 @@ red and a softer one for yellow
 (`[notify] red_sound` / `yellow_sound`, played with `afplay`). All of a tick's events
 on a PR make one notification; later activity at the same or a lower color only
 updates the menu, and a PR pops up again only when it rises (yellow → red) or after
-its row clears. Approvals, green review requests and activity on PRs you haven't
-engaged with never pop up. A notification only links to something that exists:
+its row clears. Approvals and activity on PRs you haven't engaged with never pop up.
+**A new review you owe pops up once**, in its color (`🟢 Mykal asked you to review
+ABC-123`, or `🟢 Review Woods's ABC-123` for a teammate's PR that doesn't request
+you), and opens the PR; with `[review] auto_draft` on, it waits for the draft and
+opens that instead. It's withdrawn once you review, the PR closes, you're removed as
+a reviewer, or (a teammate's PR) it stops waiting on you. The first time the watcher
+runs this, every review already owed is recorded without a popup. A notification only links to something that exists:
 clicking one of your PRs' opens a Claude session on its comments (a
 `prdigest://respond` link, so it needs the link handler above). A follow-up or
 mention waits until Claude's drafted replies are written, then opens them as a page;

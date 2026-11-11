@@ -114,13 +114,17 @@ def forget(groups, path: Path | None = None) -> None:
 
 def send(kind: str, pr: dict, color: str | None, title: str, subtitle: str, body: str,
          cfg: dict, href: str | None = None, since: str | None = None, job: str | None = None,
-         run=subprocess.run, path: Path | None = None) -> dict:
+         team: bool = False, run=subprocess.run, path: Path | None = None) -> dict:
     """Send a PR popup in its color's style (notify.popup) and record it. `pr` needs
-    url, repo and number, and id for a PR row. Returns the record, with `style`."""
+    url, repo and number, and id for a PR row. `team` marks a review popup for a
+    teammate's PR that doesn't request you (`review_outcome`). Returns the record,
+    with `style`."""
     group = group_for(kind, pr.get("repo", ""), pr.get("number", ""), job or "")
     style = notify.popup(color, title, subtitle, body, cfg, href=href, group=group, run=run)
     entry = {"kind": kind, "color": color, "since": since, "job": job, "title": title,
              "pr": {k: pr.get(k) for k in ("id", "url", "repo", "number")}}
+    if team:
+        entry["team"] = True
     record(group, entry, path)
     return {**entry, "group": group, "style": style}
 
@@ -174,7 +178,7 @@ def resolved_closed(entries: dict[str, dict], closed: dict[str, str]) -> dict[st
     return out
 
 
-def review_outcome(live: dict | None, since: str) -> tuple[str, str] | None:
+def review_outcome(live: dict | None, since: str, team: bool = False) -> tuple[str, str] | None:
     """What became of a review you owed, from `live` (watcher/gh.py review_states):
     ("closed", "the PR merged"), ("reviewed", "you reviewed it"), ("removed", "you
     were removed as a reviewer"), or None while it's still owed or couldn't be read.
@@ -183,7 +187,11 @@ def review_outcome(live: dict | None, since: str) -> tuple[str, str] | None:
     a body, as in followup.cleared_jobs: a bare reply in someone's thread is recorded
     as an empty COMMENTED review and doesn't count, and a dismissed review is owed
     again. A review of inline comments alone also counts once GitHub has dropped your
-    review request, which it does on a real review and never on a thread reply."""
+    review request, which it does on a real review and never on a thread reply.
+
+    `team`: the review is owed because a teammate opened the PR (triage/priority.py
+    team_pr), not because GitHub requests you, so an absent request means nothing and
+    only a review or the PR closing settles it here."""
     if not live:
         return None
     if live.get("state") in ("MERGED", "CLOSED"):
@@ -192,18 +200,28 @@ def review_outcome(live: dict | None, since: str) -> tuple[str, str] | None:
     if any(r.get("state") in ("APPROVED", "CHANGES_REQUESTED")
            or (r.get("state") == "COMMENTED" and (r.get("body") or "").strip()) for r in mine):
         return "reviewed", "you reviewed it"
-    if live.get("requested") is False:
+    if live.get("requested") is False and not team:
         if any(r.get("state") == "COMMENTED" for r in mine):
             return "reviewed", "you reviewed it"
         return "removed", "you were removed as a reviewer"
     return None
 
 
-def review_resolution(entry: dict, live: dict | None, me: str) -> str | None:
+def review_resolution(entry: dict, live: dict | None, me: str,
+                      owed: set[str] | None = None) -> str | None:
     """Why a review-owed popup is resolved (`review_outcome` from when the request was
-    first seen, else from when the popup went out), or None."""
-    out = review_outcome(live, entry.get("since") or entry.get("sent_at") or "")
-    return out[1] if out else None
+    first seen, else from when the popup went out), or None. A teammate's PR (`team`
+    on the entry) is also resolved once it's out of `owed`, the PR urls the menu last
+    listed as reviews you owe: it got its approvals, a change request now waits on the
+    author, or it went back to draft."""
+    team = bool(entry.get("team"))
+    out = review_outcome(live, entry.get("since") or entry.get("sent_at") or "", team)
+    if out:
+        return out[1]
+    url = ((entry.get("pr") or {}).get("url") or "").rstrip("/")
+    if team and owed is not None and url and url not in owed:
+        return "it no longer waits on your review"
+    return None
 
 
 def autofix_resolution(entry: dict, job: dict | None) -> str | None:
