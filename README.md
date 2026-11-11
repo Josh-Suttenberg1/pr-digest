@@ -88,7 +88,13 @@ if you want them, Claude reviews and automatic re-approval. macOS only.
    close them.
 6. **Watcher:** `bin/watcher install` starts it under launchd (every 2 minutes);
    `bin/watcher status` checks it, and `bin/watcher notify-test` plays each sound.
-7. **Links:** `url-handler/install.sh` registers the `prdigest://` links that
+7. **Red alerts:** `bin/watcher alert-app` builds `~/Applications/PR Digest
+   Alerts.app`, a copy of terminal-notifier that red notifications go through. In
+   **System Settings → Notifications → PR Digest Alerts**, allow notifications and
+   set the style to **Alerts**. `bin/watcher notify-test --withdraw-after 10` shows a
+   red alert and a yellow banner, then takes both back. Without the app, red alerts
+   go through SwiftBar and can't be taken back.
+8. **Links:** `url-handler/install.sh` registers the `prdigest://` links that
    notifications and draft pages use to open a Claude session.
 
 ### Your config
@@ -222,8 +228,22 @@ clicking one of your PRs' opens a Claude session on its comments (a
 mention waits until Claude's drafted replies are written, then opens them as a page;
 if the drafts don't come within 30 minutes it goes out linking to the comment on
 GitHub. A re-request on its own opens the PR. Every notification the
-watcher sends is logged to `~/.cache/pr-digest/watcher.log`. Set SwiftBar to
-**Alerts** in System Settings → Notifications so they stay on screen.
+watcher sends is logged to `~/.cache/pr-digest/watcher.log`.
+
+**Red stays, the rest slide away.** A red notification is an alert that stays on
+screen, sent through the PR Digest Alerts app; yellow and green are banners that slide
+away into Notification Center.
+
+**A notification goes away once it's done.** The watcher re-checks every PR with a
+notification out on every tick, and takes the notification out of Notification Center
+once the thing it asked for is done, wherever you did it (the menu, a Claude session,
+github.com): your PR has nothing left to answer, you answered a follow-up or mention,
+you reviewed a PR you owed a review, an auto-fix that escalated was answered, or the
+PR merged or closed. Clicking a notification or a menu link doesn't count as done by
+itself. A stale wait (🟡, time to nudge someone) stays until the review arrives. The
+menu refetches at the same moment, so its row goes too. Each withdrawal is logged to
+`~/.cache/pr-digest/watcher.log` (`withdrew popup: …`), and what's out is recorded in
+`state/watcher/popups.json` (`watcher/popups.py`).
 
 ### Automatic review drafts
 

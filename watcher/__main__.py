@@ -11,7 +11,10 @@
                                                        one pass of the automatic review drafts
                                                        (review/auto_draft.py), on its own
     python -m watcher draft-run <repo>#<n>             one draft or update (started by a pass)
-    python -m watcher notify-test                      a red and a yellow alert, each with its sound
+    python -m watcher notify-test [--withdraw-after S]  a red alert and a yellow banner, each with
+                                                       its sound; optionally withdrawn S seconds later
+    python -m watcher alert-app                        build the app red alerts go through
+                                                       (~/Applications/PR Digest Alerts.app)
     python -m watcher install                          write and load the launchd jobs (the
                                                        watcher, and the weekly lessons refresh)
 
@@ -37,6 +40,12 @@ Automatic review drafts (review/auto_draft.py), while `[review] auto_draft` is o
 tick ends with a pass that starts a draft for every review you owe that has none,
 updates drafts the author has pushed past, and sends a review's one notification once
 its draft is ready (or failed, or late).
+
+Every PR popup goes out through watcher/popups.py, which records it: red as an alert
+through the alert app (notify.py), the rest as banners. Each tick fetches every PR with
+a popup out and withdraws the popups whose item is done (`settle_popups`): the PR has
+no color left, the review you owed was given, the escalated auto-fix was answered, or
+the PR merged or closed. The menu refetches when one is withdrawn.
 
 A notification only links to something that exists. Yours open a Claude session on
 the PR's comments (prdigest://respond). A follow-up or mention waits in
@@ -67,7 +76,7 @@ import settings  # noqa: E402
 from watcher import events as ev  # noqa: E402
 from triage import mine as mine_triage  # noqa: E402
 from triage import priority  # noqa: E402
-from watcher import autofix, followup, gh, render, state  # noqa: E402
+from watcher import autofix, followup, gh, popups, render, state  # noqa: E402
 
 LABEL = "com.josh.pr-digest-watcher"
 PLIST = Path(f"~/Library/LaunchAgents/{LABEL}.plist").expanduser()
@@ -265,11 +274,13 @@ def notification_href(pr: dict, pr_jobs: list[dict], cfg: dict, dry_run: bool) -
 
 
 def deliver(notes: list[tuple], cfg: dict, dry_run: bool) -> None:
-    """One alert per PR, red first, with its color's sound; past max_notifs_per_tick,
-    one summary banner. `notes` are (pr, color, reason, events, pr_jobs)."""
+    """One popup per PR, red first, in its color's style and with its sound
+    (watcher/popups.py send, which records it so it can be withdrawn once resolved);
+    past max_notifs_per_tick, one summary banner. `notes` are (pr, color, reason,
+    events, pr_jobs)."""
     nick = names.book(fetch=True)
-    shown = [render.render_pr(pr, color, reason, evs, nick,
-                              notification_href(pr, js, cfg, dry_run))
+    shown = [{**render.render_pr(pr, color, reason, evs, nick,
+                                 notification_href(pr, js, cfg, dry_run)), "pr": pr}
              for pr, color, reason, evs, js in notes]
     shown.sort(key=lambda n: -priority.rank(n["color"]))
     room = cfg["watcher"]["max_notifs_per_tick"]
@@ -277,10 +288,9 @@ def deliver(notes: list[tuple], cfg: dict, dry_run: bool) -> None:
         if dry_run:
             print(f"[{n['color']}] {n['title']}\n    {n['subtitle']}\n    {n['body']}\n    {n['href']}")
             continue
-        notify.alert(n["title"], n["subtitle"], n["body"], href=n["href"],
-                     plugin=cfg["notify"]["swiftbar_plugin"], group=n["group"],
-                     **notify.sound_options(cfg, n["color"]))
-        _log_sent(n)
+        sent = popups.send(popups.PR, n["pr"], n["color"], n["title"], n["subtitle"], n["body"],
+                           cfg, href=n["href"])
+        _log_sent({**n, "style": sent["style"]})
     overflow = shown[room:]
     if overflow:
         msg = f"{len(overflow)} more PR{'s' if len(overflow) != 1 else ''} need you"
@@ -334,8 +344,12 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
         # The first tick that tracks notified colors records every PR's current color.
         seed_colors = not replay and "notified" not in st
         sweep = replay or seed_colors or now - (st.get("last_sweep_at") or 0) > SWEEP_EVERY
+        # Every PR with a popup out is fetched on every tick, so its popup is withdrawn
+        # within a tick of the work being done (watcher/popups.py).
+        watched = set() if replay else popups.watched_ids(popups.load())
         todo = {pid: v["kind"] for pid, v in found["prs"].items()
-                if sweep or pid not in prev or prev[pid].get("updated_at") != v["updated_at"]
+                if sweep or pid in watched or pid not in prev
+                or prev[pid].get("updated_at") != v["updated_at"]
                 or prev[pid].get("head") != v["head"]}
         detail = gh.details(todo, bots, tok) if todo else {}
         gone = [pid for pid in prev if pid not in found["prs"]]
@@ -372,18 +386,22 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
     for pid, pr in detail.items():
         found_events, prs[pid] = ev.diff_pr(pr, prev.get(pid), ctx)
         events += found_events
+    closed: dict[str, str] = {}     # PR id -> MERGED or CLOSED, for withdrawing its popups
     for pid in gone:
         if gone_states.get(pid) in ("CLOSED", "MERGED") or prs[pid].get("missing_ticks", 0) >= 30:
             prs.pop(pid, None)
+            closed[pid] = gone_states.get(pid) or "CLOSED"
             if not dry_run:
                 followup.cancel_for_pr(pid, gone_states.get(pid) or "CLOSED")
                 autofix.cancel_for_pr(pid, gone_states.get(pid) or "CLOSED", cfg)
         else:
             prs[pid]["missing_ticks"] = prs[pid].get("missing_ticks", 0) + 1
     for pid in orphans:
-        if gone_states.get(pid) in ("CLOSED", "MERGED") and not dry_run:
-            followup.cancel_for_pr(pid, gone_states[pid])
-            autofix.cancel_for_pr(pid, gone_states[pid], cfg)
+        if gone_states.get(pid) in ("CLOSED", "MERGED"):
+            closed[pid] = gone_states[pid]
+            if not dry_run:
+                followup.cancel_for_pr(pid, gone_states[pid])
+                autofix.cancel_for_pr(pid, gone_states[pid], cfg)
 
     # Follow-ups you have answered yourself (replied, resolved, re-reviewed) stop counting.
     now_iso = _iso(server_now)
@@ -417,7 +435,11 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
                             names.book(fetch=True), me,
                             required=cfg["watcher"]["required_approvals"])
     deliver(ready, cfg, dry_run)
+    settled = {} if replay else settle_popups(popups.load(), set(detail), set(notified), closed,
+                                              me, tok, cfg)
     if dry_run:
+        for group, why in settled.items():
+            print(f"-- would withdraw popup {group}: {why}")
         for pid, p in pending.items():
             print(f"[{notified.get(pid, {}).get('color')} · waits for Claude's drafted replies] "
                   f"{p['pr']['repo']}#{p['pr']['number']} · {p['pr']['title']}")
@@ -453,9 +475,52 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
         _notice(cfg, "⚠️ claude CLI is logged out", "Follow-ups are waiting. Run: claude auth login", "alert")
     st["claude_auth_alerted"] = logged_out
     state.save(st)
+    if settled:
+        popups.withdraw(settled, log=lambda m: print(m, flush=True))
+        _refetch_menu()
     drafts_pass(cfg)
     _refresh_menu(cfg)
     return 0
+
+
+def settle_popups(entries: dict[str, dict], checked: set[str], still_colored: set[str],
+                  closed: dict[str, str], me: str, tok: str, cfg: dict) -> dict[str, str]:
+    """group -> why, for each popup whose item is done (watcher/popups.py): its PR
+    merged or closed; a PR row classified this tick (`checked`) has no color left
+    (`still_colored`, the PR ids in `notified`); an escalated auto-fix isn't escalated
+    any more; or you reviewed a PR whose review-owed popup is out, which one GraphQL
+    call reads for all of them."""
+    out = popups.resolved_closed(entries, closed)
+    out.update({g: w for g, w in popups.resolved_rows(entries, checked, still_colored).items()
+                if g not in out})
+    for g, e in entries.items():
+        if e.get("kind") == popups.AUTOFIX and g not in out:
+            try:
+                job = autofix.load_job(e.get("job") or "")
+            except (OSError, ValueError):
+                job = None
+            why = popups.autofix_resolution(e, job)
+            if why:
+                out[g] = why
+    reviews = {g: e for g, e in popups.review_entries(entries).items() if g not in out}
+    if reviews:
+        try:
+            live = gh.review_states([e["pr"]["url"] for e in reviews.values()], me, tok)
+        except gh.GhError as exc:
+            print(f"popups: couldn't read review states: {str(exc)[:200]}", flush=True)
+            live = {}
+        for g, e in reviews.items():
+            why = popups.review_resolution(e, live.get((e["pr"]["url"] or "").rstrip("/")), me)
+            if why:
+                out[g] = why
+    return out
+
+
+def _refetch_menu() -> None:
+    """Start the menu's background fetch now (unless one is running), so a row whose
+    popup was just withdrawn leaves the menu in the same minute."""
+    from review import auto_draft
+    auto_draft.refresh_triage()
 
 
 def drafts_pass(cfg: dict, dry_run: bool = False, **kw) -> list[dict]:
@@ -560,17 +625,46 @@ def install(cfg: dict) -> int:
     return rc
 
 
-def notify_test(cfg: dict) -> int:
-    """A red alert, then a yellow one, each with its sound, so you can hear both."""
+def notify_test(cfg: dict, withdraw_after: int = 0) -> int:
+    """A red popup, then a yellow one, each in its style and with its sound, so you can
+    see and hear both. With `withdraw_after`, both are withdrawn that many seconds
+    later, as a resolved item's popup would be."""
+    groups = []
     for color, title, body in (
             ("red", "🔴 ABC-123 · Test: someone answered your blocking comment",
              "Red: needs you now. This one stays until you close it."),
             ("yellow", "🟡 ABC-124 · Test: someone answered your nit",
-             "Yellow: waiting a while. The softer chime.")):
-        notify.alert(title, "Test notification from the PR watcher", body,
-                     plugin=cfg["notify"]["swiftbar_plugin"],
-                     **notify.sound_options(cfg, color))
+             "Yellow: act soon. It slides away, with the softer chime.")):
+        group = f"pr-digest-test-{color}"
+        style = notify.popup(color, title, "Test notification from the PR watcher", body, cfg,
+                             group=group)
+        print(f"sent {color} as {'an alert' if style == 'alert' else 'a banner'} ({group})")
+        groups.append(group)
         time.sleep(2)
+    if not notify.alert_notifier():
+        print("The alert app isn't installed, so red went through SwiftBar and can't be "
+              "withdrawn. Build it with: bin/watcher alert-app")
+    if withdraw_after:
+        time.sleep(withdraw_after)
+        for group in groups:
+            notify.withdraw(group)
+        print(f"withdrew both after {withdraw_after}s")
+    return 0
+
+
+def alert_app(cfg: dict) -> int:
+    """Build the alert app (notify.install_alert_app), then send one alert through it
+    so macOS asks to allow its notifications."""
+    try:
+        path = notify.install_alert_app()
+    except (OSError, RuntimeError) as exc:
+        print(f"couldn't build the alert app: {exc}", file=sys.stderr)
+        return 1
+    print(f"built {path}")
+    notify.alert("🔴 PR Digest Alerts is set up", "Red PR notifications come from this app",
+                 "Allow its notifications, and keep its style on Alerts in System Settings → "
+                 "Notifications → PR Digest Alerts.", plugin=cfg["notify"]["swiftbar_plugin"],
+                 group="pr-digest-alert-app", **notify.sound_options(cfg))
     return 0
 
 
@@ -581,7 +675,10 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--dry-run", action="store_true")
     t.add_argument("--since", help="with --dry-run: replay this window, e.g. 24h")
     sub.add_parser("status")
-    sub.add_parser("notify-test")
+    nt = sub.add_parser("notify-test")
+    nt.add_argument("--withdraw-after", type=int, default=0, metavar="SECONDS",
+                    help="withdraw both test popups this many seconds later")
+    sub.add_parser("alert-app")
     sub.add_parser("install")
     for name in ("post", "dismiss", "followup-run"):
         sub.add_parser(name).add_argument("job")
@@ -609,7 +706,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "status":
         return status(cfg)
     if args.cmd == "notify-test":
-        return notify_test(cfg)
+        return notify_test(cfg, args.withdraw_after)
+    if args.cmd == "alert-app":
+        return alert_app(cfg)
     if args.cmd == "install":
         return install(cfg)
     if args.cmd == "post":

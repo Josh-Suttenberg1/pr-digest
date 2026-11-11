@@ -228,3 +228,48 @@ def details(ids_kinds: dict[str, str], bots: set[str], tok: str) -> dict[str, di
 def states(ids: list[str], tok: str) -> dict[str, str]:
     data, _ = graphql(STATE_QUERY, {"ids": ids}, tok)
     return {n["id"]: n.get("state") for n in data.get("nodes") or [] if n}
+
+
+def _parse_pr_url(url: str) -> tuple[str, str, int] | None:
+    """(owner, repo, number) from https://github.com/<owner>/<repo>/pull/<n>."""
+    parts = url.rstrip("/").split("/")
+    if len(parts) < 7 or parts[-2] != "pull" or not parts[-1].isdigit():
+        return None
+    return parts[-4], parts[-3], int(parts[-1])
+
+
+def review_states_query(urls: list[str], me: str) -> tuple[str, dict[str, str], dict]:
+    """One query reading each PR's state and your reviews, aliased p0, p1, …; and
+    alias -> url; and the variables. Logins and repo names are passed as variables,
+    never spliced into the query."""
+    parts, alias_url, decls, variables = [], {}, ["$me: String!"], {"me": me}
+    for i, url in enumerate(urls):
+        parsed = _parse_pr_url(url)
+        if not parsed:
+            continue
+        owner, repo, number = parsed
+        decls += [f"$o{i}: String!", f"$r{i}: String!", f"$n{i}: Int!"]
+        variables.update({f"o{i}": owner, f"r{i}": repo, f"n{i}": number})
+        parts.append(f"p{i}: repository(owner: $o{i}, name: $r{i}) {{ pullRequest(number: $n{i}) {{ "
+                     f"state reviews(last: 30, author: $me) {{ nodes {{ state submittedAt body }} }} }} }}")
+        alias_url[f"p{i}"] = url.rstrip("/")
+    query = f"query({', '.join(decls)}) {{ {' '.join(parts)} }}"
+    return query, alias_url, variables
+
+
+def review_states(urls: list[str], me: str, tok: str) -> dict[str, dict]:
+    """PR url -> {state, reviews: [{state, submitted_at, body}]} (your reviews only), for
+    watcher/popups.py review_resolution. A PR that couldn't be read is left out."""
+    query, alias_url, variables = review_states_query(urls, me)
+    if not alias_url:
+        return {}
+    data, _ = graphql(query, variables, tok)
+    out = {}
+    for alias, url in alias_url.items():
+        pr = ((data.get(alias) or {}).get("pullRequest")) or None
+        if pr:
+            out[url] = {"state": pr.get("state"),
+                        "reviews": [{"state": r.get("state"), "submitted_at": r.get("submittedAt"),
+                                     "body": r.get("body") or ""}
+                                    for r in (pr.get("reviews") or {}).get("nodes") or []]}
+    return out

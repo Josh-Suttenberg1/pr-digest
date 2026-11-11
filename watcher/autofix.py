@@ -1184,10 +1184,12 @@ class Fix:
         import session
         from triage import priority
         key = priority.ticket(self.pr.get("title") or "", self.pr["url"])
-        notify.alert(f"🔴 Couldn't auto-fix {self._who()}'s {self.job['kind']} on {key}",
-                     render.subtitle(self.pr), reason, href=session.respond_url(self.pr["url"]),
-                     plugin=self.cfg["notify"]["swiftbar_plugin"], group=f"autofix-{self.job['id']}",
-                     run=self.tools.notify_run, **notify.sound_options(self.cfg, "red"))
+        from watcher import popups
+        popups.send(popups.AUTOFIX, self.pr, "red",
+                    f"🔴 Couldn't auto-fix {self._who()}'s {self.job['kind']} on {key}",
+                    render.subtitle(self.pr), reason, self.cfg,
+                    href=session.respond_url(self.pr["url"]), job=self.job["id"],
+                    run=self.tools.notify_run)
 
 
 # --- starting runs ---------------------------------------------------------------------

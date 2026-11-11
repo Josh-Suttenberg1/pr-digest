@@ -582,16 +582,19 @@ def tick(cfg: dict, dry_run: bool = False, *, now: float | None = None, limit: i
             job.update(announced_at=int(now), announced_state=state)
             save_job(job)
     if notes:
-        (deliver or (lambda ns: notify_reviews(ns, cfg, dry_run, log)))(notes)
+        (deliver or (lambda ns: notify_reviews(ns, cfg, dry_run, log, jobs=jobs)))(notes)
     return notes
 
 
-def notify_reviews(notes: list[dict], cfg: dict, dry_run: bool = False, log=print) -> None:
-    """One notification per review: red and yellow as alerts with their sound, green as
-    a banner. Clicking opens the draft as a page (review/view_draft.py), or the PR when
-    there's no draft."""
+def notify_reviews(notes: list[dict], cfg: dict, dry_run: bool = False, log=print,
+                   jobs: dict[str, dict] | None = None) -> None:
+    """One notification per review, in its color's style (red stays on screen, the
+    rest slide away) with its sound, recorded by watcher/popups.py so it's withdrawn
+    once you've reviewed the PR. `jobs` (key -> scheduling state) gives each its
+    `since`, when the request was first seen. Clicking opens the draft as a page
+    (review/view_draft.py), or the PR when there's no draft."""
     import names
-    import notify
+    from watcher import popups
     nick = names.book(fetch=True)
     for n in sorted(notes, key=lambda n: -priority.rank(n["color"])):
         pr = n["pr"]
@@ -607,11 +610,10 @@ def notify_reviews(notes: list[dict], cfg: dict, dry_run: bool = False, log=prin
         if dry_run:
             log(f"[{n['color']}] {title}\n    {sub}\n    {n['reason']}\n    {href}")
             continue
-        group = f"pr-{pr['repo']}-{pr['number']}"
-        if n["color"] in (priority.RED, priority.YELLOW):
-            notify.alert(title, sub, n["reason"], href=href, plugin=cfg["notify"]["swiftbar_plugin"],
-                         group=group, **notify.sound_options(cfg, n["color"]))
-        else:
-            notify.banner(title, sub, n["reason"], href=href, group=group)
+        seen = _epoch((jobs or {}).get(n.get("key"), {}).get("seen_at")) if jobs else None
+        since = (datetime.fromtimestamp(seen, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                 if seen else None)
+        popups.send(popups.REVIEW, {**pr, "url": n.get("url") or pr.get("url")}, n["color"],
+                    title, sub, n["reason"], cfg, href=href, since=since)
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         log(f"{stamp} sent review: {title} | {sub} | {n['reason']} → {href}")
