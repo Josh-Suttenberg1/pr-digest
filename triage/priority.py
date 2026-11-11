@@ -765,19 +765,31 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
     activity time it was dismissed at; `autofix` every auto-fix job, which only your
     PRs carry (an entry's `autofix`).
 
+    Answer jobs (follow-up jobs with `trigger` "answer", drafted replies to comments on
+    your PRs) ride on your PR's entry as `answers`, never as follow-ups; while one is
+    being written the row has no dot ("Claude is drafting replies").
+
     `drafts` (PR url → {"state", "tooltip"}, review/auto_draft.py states) is given
     while automatic drafts are on. A review you owe then carries its draft state in
     its reason and its `tooltip`, and one with no state yet (its draft is still being
     written) gets no entry at all: no row, no count, until the draft is ready."""
     dismissed = dismissed or {}
     fixes = jobs_by_url(autofix or [])
+    answers = jobs_by_url(j for j in jobs if j.get("trigger") == "answer")
+    jobs = [j for j in jobs if j.get("trigger") != "answer"]
     out: list[dict] = []
     for row in mine_rows:
         url = row["url"].rstrip("/")
         p = mine(row, nick, required, dismissed.get(row["url"]), now=now,
                  stale_after_days=stale_after_days, autofix=fixes.get(url, []))
+        if p["group"] == NEEDS and p["color"] and any(
+                j.get("status") in ("queued", "running") for j in answers.get(url, [])):
+            p = {**p, "color": None, "reason": f"Claude is drafting replies · {p['reason']}",
+                 "why": "Why no dot yet: Claude is drafting your replies; the dot and the "
+                        "popup come when they're ready"}
         out.append({**p, "url": row["url"], "title": row.get("title", ""), "row": row,
-                    "st": None, "jobs": [], "autofix": fixes.get(url, [])})
+                    "st": None, "jobs": [], "autofix": fixes.get(url, []),
+                    "answers": answers.get(url, [])})
 
     by_url: dict[str, list[dict]] = {}
     for j in jobs:

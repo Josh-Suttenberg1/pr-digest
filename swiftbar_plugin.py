@@ -679,9 +679,36 @@ def to_answer(row: dict) -> list[dict]:
         items.append({"kind": c.get("kind") or ck.kind(c.get("body", "")),
                       "author": c.get("author", "?"),
                       "summary": c.get("summary") or ck.summary(c.get("body", "")),
-                      "path": "", "url": c.get("url") or "", "body": c.get("body", "")})
+                      "path": "", "url": c.get("url") or "", "body": c.get("body", ""),
+                      "thread_id": ""})
     items.sort(key=lambda i: ck.sort_key(i["kind"]))
     return items
+
+
+def answer_drafts(row: dict, jobs: list[dict]) -> dict[str, dict]:
+    """Comment url -> the answer job drafting your reply to it (watcher/followup.py),
+    for every comment still waiting on you on this PR that has one."""
+    try:
+        from watcher import followup
+    except Exception:  # noqa: BLE001 — the menu must keep working without the watcher
+        return {}
+    by_id = {j["id"]: j for j in jobs if j.get("status") in ("queued", "running", "ready", "failed")}
+    out = {}
+    for ask in followup.answer_asks(row):
+        job = by_id.get(followup.answer_job_id(ask))
+        if job and ask.get("url"):
+            out[ask["url"]] = job
+    return out
+
+
+def draft_note(job: dict) -> str:
+    """A drafted reply's state, for its comment's line in the menu."""
+    if job["status"] in ("queued", "running"):
+        return "Claude is drafting a reply"
+    if job["status"] == "failed":
+        return "draft failed"
+    from watcher import followup
+    return f"reply drafted, {followup.STANCE_WORDS.get(job.get('verdict'), 'ready')}"
 
 
 def review_lines(row: dict, nick: dict[str, str], required: int) -> list[tuple[str, str]]:
@@ -733,16 +760,41 @@ def mine_block(e: dict, nick: dict[str, str], required: int) -> None:
     asks = to_answer(row)
     fixes = shown_fixes(e.get("autofix") or [])
     by_thread = {j.get("thread_id"): j for j in fixes}
+    drafts = answer_drafts(row, e.get("answers") or [])
     if asks:
         emit("-----")
         emit(f"--To answer ({len(asks)})", color="#888888")
         for i in asks:
             where = f" · {Path(i['path']).name}" if i["path"] else ""
             job = by_thread.get(i["thread_id"]) if i["thread_id"] else None
-            note = f" · {fix_state(job)}" if job else ""
+            draft = drafts.get(i["url"])
+            note = f" · {fix_state(job)}" if job else (f" · {draft_note(draft)}" if draft else "")
             emit(f"--{ck.WORDS.get(i['kind'], i['kind'])} · {_who(i['author'], nick)}{where} — "
                  f"{truncate(sanitize(i['summary']), 80)}{sanitize(note)}",
                  href=i["url"] or url, tooltip=truncate(sanitize(i["body"]), 600))
+            if draft and draft["status"] in ("ready", "failed"):
+                _response_detail(draft)
+    for b in row.get("blockers") or []:
+        draft = drafts.get(b.get("url") or "")
+        if draft:
+            emit(f"--Change request · {_who(b['author'], nick)} — "
+                 f"{truncate(sanitize(ck.summary(b.get('body') or '')), 70)} · {draft_note(draft)}",
+                 href=b.get("url") or url)
+            if draft["status"] in ("ready", "failed"):
+                _response_detail(draft)
+    ready = [j for j in drafts.values() if j["status"] == "ready"]
+    if ready:
+        emit("-----")
+        if len(ready) == 1:
+            _read_item("--Read Claude's drafted reply", ready[0]["report"])
+        else:
+            emit(f"--Read Claude's drafted replies ({len(ready)})")
+            for j in ready:
+                _read_item(f"----{_who(j.get('actor') or '', nick)} · "
+                           f"{truncate(sanitize(ck.summary(j.get('body') or '')), 60)}", j["report"])
+        emit("--Post the drafted replies" if len(ready) > 1 else "--Post the drafted reply",
+             bash=str(WATCHER), param1="post", param2=",".join(j["id"] for j in ready),
+             terminal="false", refresh="true")
     if fixes:
         autofix_lines(fixes, nick)
     emit("-----")
@@ -1012,9 +1064,12 @@ def _response_detail(job: dict) -> None:
     click is your approval); "Edit first" opens it, and posting then uses whatever
     the file holds."""
     emit("----Open the thread on GitHub", href=job["url"])
-    if job.get("trigger") == "mention":
+    if job.get("trigger") in ("mention", "answer"):
         emit(f"----Their comment: {truncate(sanitize(job.get('body') or ''), 80)}",
              color="#888888", tooltip=sanitize(job.get("body") or ""))
+    if job.get("trigger") == "answer" and job["status"] == "ready" and job.get("note"):
+        emit(f"----Claude: {truncate(sanitize(job['note']), 100)}", color="#888888",
+             tooltip=sanitize(job["note"]))
     else:
         emit(f"----Your comment: {truncate(sanitize(job.get('my_comment') or ''), 80)}",
              color="#888888", tooltip=sanitize(job.get("my_comment") or ""))
@@ -1031,7 +1086,8 @@ def _response_detail(job: dict) -> None:
              terminal="false", refresh="true")
         emit("----Edit first", bash="/usr/bin/open", param1="-t", param2=job["reply_file"],
              terminal="false")
-        _read_item("----Read Claude's follow-up", job["report"])
+        _read_item("----Read Claude's draft" if job.get("trigger") == "answer"
+                   else "----Read Claude's follow-up", job["report"])
     emit("----Dismiss this one", bash=str(WATCHER), param1="dismiss", param2=job["id"],
          terminal="false", refresh="true")
 

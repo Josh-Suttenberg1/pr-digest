@@ -230,6 +230,17 @@ if the drafts don't come within 30 minutes it goes out linking to the comment on
 GitHub. A re-request on its own opens the PR. Every notification the
 watcher sends is logged to `~/.cache/pr-digest/watcher.log`.
 
+**Comments on your PRs come with drafted replies.** Each comment newly waiting on you
+(an open thread whose last word isn't yours, a top-level comment, or a change request's
+body) gets a reply drafted by Claude from the PR's code (`[models] followup`), unless an
+auto-fix is working on it. The draft takes a stance: it answers a question, agrees to a
+change (said as a plan, never as done), pushes back with the reason, or says it needs
+your call and what to decide. The PR's row shows "Claude is drafting replies" with no
+dot until they're written; then the dot and the popup arrive together, and the popup
+opens the drafts as a page. In the menu each comment shows its draft under it, with
+Post this reply, Edit first and Dismiss, and the PR has Post the drafted replies.
+Nothing posts until you click.
+
 **Red stays, the rest slide away.** A red notification is an alert that stays on
 screen, sent through the PR Digest Alerts app; yellow and green are banners that slide
 away into Notification Center.

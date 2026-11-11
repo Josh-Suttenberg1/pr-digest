@@ -1,11 +1,22 @@
 """Follow-ups: when someone responds to your review comment, check the new commits;
-when someone @mentions you, draft your answer.
+when someone @mentions you, draft your answer; when a reviewer comments on your own PR,
+draft your reply.
 
 A job is one JSON file in state/watcher/jobs/<job_id>.json. A response's id is derived
 from (thread id, your comment id), a mention's from the mentioning item, so the same
 response or mention never queues twice. A mention job has `trigger` "mention" and
 `where` (issue comment, review body, or inline comment); its reply posts as a reply in
 the inline thread, or as a top-level comment otherwise.
+
+An answer job (`trigger` "answer") is a comment waiting on you on your own PR: an open
+thread whose last word isn't yours, a top-level comment, or a change request's body
+(`answer_asks`, from the triage/mine.py row). Its id comes from the comment that put
+it on you, so a new reply in the same thread queues a fresh one. Claude reads the PR's
+code and drafts the reply with a `stance`: answer (a question, answered from the
+code), agree (a change worth making, said as a plan, never as done), push_back (with
+the reason from the code), or needs_you (it needs your call; `note` says what). A
+comment an auto-fix is working on gets no answer job. It clears once the comment is no
+longer waiting on you (`stale_answers`).
 
   queued  -> running (detached `python -m watcher followup-run <job>`) -> ready | failed
   ready   -> posted (you clicked "Post this reply") | dismissed
@@ -111,12 +122,122 @@ Output ONLY a JSON object, no prose, no code fences:
 """
 
 
+ANSWER_PROMPT = """@{actor} left a {kind} on @{me}'s own pull request. Draft @{me}'s reply.
+
+PR: avetta/{repo}#{number} — {title}
+Where: {where}
+Their comment ({url}):
+---
+{body}
+---
+{thread}
+{clone_text}
+
+First decide what the reply does (its "stance"):
+- "answer": they asked a question or want an explanation. Answer it from the code.
+- "agree": they asked for a change that is worth making. Say briefly what will change.
+  Nothing has been pushed yet, so never say or imply that it's done or fixed.
+- "push_back": the change isn't warranted. Say why, grounded in the code, politely.
+- "needs_you": the reply needs @{me}'s own decision or knowledge you can't find in the
+  code. The reply says @{me} will follow up; "note" says what @{me} has to decide.
+
+Reply rules: address @{actor} by handle, plain English, at most 4 sentences. Ground every
+claim in the code or the PR and never invent facts. No bare acceptance-criteria labels.
+Don't add a signature.
+
+Output ONLY a JSON object, no prose, no code fences:
+{{"stance": "answer" | "agree" | "push_back" | "needs_you",
+  "summary": "<one line: what they asked or told @{me}>",
+  "note": "<one line for @{me}: why this stance, or what to decide>",
+  "reply": "..."}}
+"""
+
+STANCES = ("answer", "agree", "push_back", "needs_you")
+# What each stance means, in the menu and on the page of drafted replies.
+STANCE_WORDS = {"answer": "answers it", "agree": "agrees to change it",
+                "push_back": "pushes back", "needs_you": "needs your call"}
+
+
 def job_id(thread_id: str, arm_id: int) -> str:
     return hashlib.sha1(f"{thread_id}:{arm_id}".encode()).hexdigest()[:12]
 
 
 def mention_job_id(where: str, comment_id: int) -> str:
     return hashlib.sha1(f"mention:{where}:{comment_id}".encode()).hexdigest()[:12]
+
+
+def answer_job_id(ask: dict) -> str:
+    """An answer job's id, from the comment that put it on you (`ask["key"]`)."""
+    return hashlib.sha1(f"answer:{ask['key']}".encode()).hexdigest()[:12]
+
+
+def answer_asks(row: dict) -> list[dict]:
+    """Every comment waiting on you on one of your PRs (a triage/mine.py row), as the
+    asks an answer job drafts a reply to: {key, where, kind, actor, body, url,
+    thread_id, path, thread}. A thread's key is its id and the time of the comment
+    that put it on you; a top-level comment's and a change request's is its url."""
+    from triage import comment_kind
+    out = []
+    for t in row.get("threads_waiting") or []:
+        # The comment to answer is the thread's last, which put it back on you; the
+        # whole thread goes along for context.
+        bodies = t.get("bodies") or []
+        body = bodies[-1]["body"] if bodies else ""
+        out.append({"key": f"{t.get('thread_id')}@{t.get('last_at')}", "where": "inline",
+                    "kind": t.get("kind") or comment_kind.kind(body),
+                    "actor": t.get("last_author") or t.get("author") or "",
+                    "body": body,
+                    "url": t.get("url") or "", "thread_id": t.get("thread_id") or "",
+                    "path": t.get("path") or "", "thread": bodies})
+    for c in row.get("unanswered_comments") or []:
+        out.append({"key": c.get("url") or f"{c.get('author')}@{c.get('at')}", "where": "issue",
+                    "kind": c.get("kind") or comment_kind.kind(c.get("body") or ""),
+                    "actor": c.get("author") or "", "body": c.get("body") or "",
+                    "url": c.get("url") or "", "thread_id": "", "path": "", "thread": []})
+    for b in row.get("blockers") or []:
+        if not (b.get("body") or "").strip():
+            continue
+        out.append({"key": b.get("url") or f"cr:{b.get('author')}@{b.get('at')}", "where": "review",
+                    "kind": "blocking", "actor": b.get("author") or "", "body": b.get("body") or "",
+                    "url": b.get("url") or "", "thread_id": "", "path": "", "thread": []})
+    return out
+
+
+def answers_to_queue(pr: dict, asks: list[dict], jobs: list[dict],
+                     fixing_threads: set[str]) -> list[dict]:
+    """The asks on one of your PRs that need an answer job: none queued for it yet, and
+    no auto-fix working on its thread (`fixing_threads`). Pure."""
+    known = {j["id"] for j in jobs}
+    return [a for a in asks if answer_job_id(a) not in known
+            and not (a["thread_id"] and a["thread_id"] in fixing_threads)]
+
+
+def stale_answers(pr_id: str, asks: list[dict], jobs: list[dict]) -> list[tuple[str, str]]:
+    """(job id, why) for the open answer jobs on a PR whose comment is no longer
+    waiting on you (`asks` is what still is): you replied, resolved the thread, or
+    re-requested the reviewer. Pure."""
+    live = {answer_job_id(a) for a in asks}
+    return [(j["id"], "you answered it") for j in jobs
+            if j.get("trigger") == "answer" and (j.get("pr") or {}).get("id") == pr_id
+            and j.get("status") in CLEARABLE and j["id"] not in live]
+
+
+def answer_job(pr: dict, ask: dict, root_id: int | None, now: str) -> dict:
+    """A queued answer job. `pr` is the watcher snapshot's PR ref; `root_id` the
+    thread's first comment, which an inline reply posts under."""
+    return {"id": answer_job_id(ask), "status": "queued", "trigger": "answer", "created_at": now,
+            **{k: ask.get(k) for k in ("where", "kind", "actor", "body", "url", "thread_id",
+                                       "path", "thread")},
+            "root_id": root_id if ask["where"] == "inline" else None,
+            "head": pr.get("head"), "my_comment": "", "blocking": ask["kind"] == "blocking",
+            "pr": {k: pr.get(k) for k in ("id", "repo", "number", "title", "url", "author", "head")}}
+
+
+def enqueue_answer(job: dict) -> str | None:
+    if job_path(job["id"]).exists():
+        return None
+    save_job(job)
+    return job["id"]
 
 
 def event_job_id(event: dict) -> str:
@@ -513,6 +634,59 @@ def build_mention_prompt(job: dict, clone: Path, me: str) -> str:
         thread=thread, clone_text=clone_text)
 
 
+def build_answer_prompt(job: dict, clone: Path, me: str) -> str:
+    pr = job["pr"]
+    from triage import comment_kind
+    where = {"issue": "a top-level comment on the PR", "review": "the body of their change request",
+             "inline": f"an inline comment on {job.get('path')}"}[job["where"]]
+    thread = ""
+    if job.get("thread"):
+        thread = "The thread, in order:\n" + "\n".join(
+            f"- @{c['author']}: {c['body'][:1500]}" for c in job["thread"])
+    clone_text = "(no local clone of this repo; answer from the comment and the thread)"
+    if (clone / ".git").exists():
+        _git(clone, "fetch", "-q", "--no-write-fetch-head", "origin", f"pull/{pr['number']}/head")
+        clone_text = (f"The clone is at {clone}; the PR head is {str(job.get('head') or '')[:12]}. "
+                      f"You may read with `git -C {clone} show|log|diff` at that commit.")
+    return ANSWER_PROMPT.format(
+        actor=job["actor"], me=me, kind=comment_kind.WORDS.get(job.get("kind"), "comment").lower(),
+        repo=pr["repo"], number=pr["number"], title=pr["title"], where=where,
+        url=job.get("url") or "", body=job.get("body") or "", thread=thread, clone_text=clone_text)
+
+
+def parse_answer_result(text: str) -> dict:
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("no JSON object in the result")
+    data = json.loads(text[start:end + 1])
+    if not str(data.get("reply") or "").strip():
+        raise ValueError("empty reply")
+    stance = data.get("stance") if data.get("stance") in STANCES else "needs_you"
+    return {"verdict": stance, "mechanical": False, "evidence": [],
+            "summary": str(data.get("summary") or "").strip(),
+            "note": str(data.get("note") or "").strip(), "reply": data["reply"]}
+
+
+def answer_report(job: dict, result: dict) -> str:
+    pr = job["pr"]
+    quoted = "\n".join(f"> {ln}" for ln in (job.get("body") or "").splitlines())
+    where = f" on `{job['path']}`" if job.get("path") else ""
+    return "\n".join([
+        f"# Reply to @{job['actor']}: {render.subtitle(pr)}", "", f"🔗 {pr['url']}",
+        f"Their comment{where}: {job.get('url') or ''}", "",
+        f"**@{job['actor']}:** {result.get('summary') or ''}", "", quoted, "",
+        f"**Claude's draft {STANCE_WORDS.get(result['verdict'], result['verdict'])}.** "
+        f"{result.get('note') or ''}", "",
+        "## Drafted reply", "", with_footer(result["reply"]), "",
+        "Post it from the menu (My PRs → this PR → Post this reply), or work through the "
+        f"comments with Claude: {respond_link(pr['url'])}", ""])
+
+
+def respond_link(pr_url: str) -> str:
+    import session
+    return session.respond_url(pr_url)
+
+
 def parse_mention_result(text: str) -> dict:
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
@@ -566,12 +740,17 @@ def run(jid: str, cfg: dict | None = None) -> int:
     reports = settings.path_of(cfg["watcher"]["reports_dir"])
     reports.mkdir(parents=True, exist_ok=True)
     mention = job.get("trigger") == "mention"
-    if mention:
+    answer = job.get("trigger") == "answer"
+    if answer:
+        stem = reports / f"{pr['repo']}-{pr['number']}-answer-{jid}"
+    elif mention:
         stem = reports / f"{pr['repo']}-{pr['number']}-mention-{job['comment_id']}"
     else:
         stem = reports / f"{pr['repo']}-{pr['number']}-{job['root_id']}-{job['arm_id']}"
     try:
-        if mention:
+        if answer:
+            prompt = build_answer_prompt(job, clone, cfg["me"])
+        elif mention:
             prompt = build_mention_prompt(job, clone, cfg["me"])
         elif not (clone / ".git").exists():
             raise RuntimeError(f"no local clone at {clone}")
@@ -592,14 +771,16 @@ def run(jid: str, cfg: dict | None = None) -> int:
         envelope = json.loads(proc.stdout or "{}")
         if envelope.get("is_error") or not envelope.get("result"):
             raise RuntimeError(f"claude failed: {str(envelope.get('result') or proc.stderr)[:200]}")
-        result = (parse_mention_result if mention else parse_result)(envelope["result"])
+        result = (parse_answer_result if answer else parse_mention_result if mention
+                  else parse_result)(envelope["result"])
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
         job.update(status="failed", error=str(exc)[:300])
         save_job(job)
         notify.banner("⚠️ Follow-up failed", render.subtitle(pr), str(exc)[:200], href=job["url"])
         return 1
 
-    stem.with_suffix(".md").write_text((mention_report if mention else report_markdown)(job, result))
+    stem.with_suffix(".md").write_text(
+        (answer_report if answer else mention_report if mention else report_markdown)(job, result))
     reply_path = stem.with_name(stem.name + ".reply.md")
     reply_path.write_text(with_footer(result["reply"]) + "\n")
     stem.with_suffix(".json").write_text(json.dumps({**result, "job": jid}, indent=2) + "\n")
@@ -607,7 +788,9 @@ def run(jid: str, cfg: dict | None = None) -> int:
                report=str(stem.with_suffix(".md")),
                reply_file=str(reply_path), cost_usd=envelope.get("total_cost_usd"),
                finished_at=int(time.time()))
-    if mention:
+    if answer:
+        job["note"] = result.get("note") or ""
+    if mention or answer:
         save_job(job)
         return 0
     shas, why = reapproval_plan(job, result, cfg, clone)

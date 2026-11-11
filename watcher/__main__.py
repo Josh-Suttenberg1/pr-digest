@@ -31,6 +31,10 @@ posted the drafted replies, re-reviewed) or you dismissed its menu row
 (state/watcher/cleared.json); the next response then notifies afresh. Uncolored
 activity, green review requests and approvals never notify.
 
+Comments on your PRs get drafted replies (watcher/followup.py answer jobs,
+`plan_answers`): each comment newly waiting on you that no auto-fix is working on
+queues one, the PR's popup waits for them like a follow-up's, and then opens them.
+
 Auto-fixes (watcher/autofix.py), while `[autofix] enabled` is on: a new nit or
 suggestion that opens a thread on your PR (events.opened_threads) queues a fix before
 the PR is classified, and a comment being fixed doesn't count, so it pops nothing up.
@@ -130,7 +134,8 @@ def pr_priority(pr: dict, cfg: dict, jobs: list[dict],
     """(color, reason) for one PR snapshot, through triage/priority.py. Your PRs take
     a fresh triage/mine.py row (one gh call); others' take their open follow-up jobs
     (`jobs`, including this tick's new responses) and any pending re-request. A PR of
-    yours also leaves its sub-header and reason in `groups` (PR id -> {group, reason})."""
+    yours also leaves its sub-header, reason and the comments waiting on you in
+    `groups` (PR id -> {group, reason, asks}, followup.answer_asks)."""
     nick = names.book(fetch=True)
     if pr["kind"] == "mine":
         try:
@@ -142,7 +147,8 @@ def pr_priority(pr: dict, cfg: dict, jobs: list[dict],
         p = priority.mine(row, nick, cfg["watcher"]["required_approvals"],
                           stale_after_days=cfg["priority"]["stale_after_days"], autofix=fixes)
         if groups is not None:
-            groups[pr["id"]] = {"group": p["group"], "reason": p["reason"]}
+            groups[pr["id"]] = {"group": p["group"], "reason": p["reason"],
+                                "asks": followup.answer_asks(row)}
         return p["color"], p["reason"]
     f = priority.followup([j for j in jobs if (j.get("pr") or {}).get("id") == pr["id"]],
                           nick, author=pr["author"],
@@ -207,26 +213,31 @@ _EVENT_KEYS = ("type", "actor", "state", "first_line", "count", "trigger", "path
 
 def hold_for_drafts(notes: list[tuple[dict, str, str, list[dict]]], pending: dict[str, dict],
                     jobs: list[dict], now: str, nick: dict[str, str], me: str,
-                    max_minutes: int = PENDING_MAX_MINUTES, required: int = 2) -> list[tuple]:
+                    max_minutes: int = PENDING_MAX_MINUTES, required: int = 2,
+                    still_colored: set[str] | None = None) -> list[tuple]:
     """Which notifications go out now, as [(pr, color, reason, events, pr_jobs)].
 
-    A follow-up or mention whose drafts are still being written waits in `pending`
-    (PR id -> {pr, events, rerequested_at, since}). Each tick releases the ones whose
-    jobs have all finished, reclassified from those jobs, or that waited longer than
-    `max_minutes`; one whose row cleared meanwhile is dropped."""
+    A PR whose drafts are still being written waits in `pending` (PR id -> {pr, events,
+    rerequested_at, since, color, reason}): a follow-up or mention on someone else's PR,
+    or comments on yours whose replies Claude is drafting (answer jobs). Each tick
+    releases the ones whose jobs have all finished, or that waited longer than
+    `max_minutes`. Someone else's PR is reclassified from its jobs then; yours goes out
+    at the color it was held at, unless its row cleared meanwhile (it's no longer in
+    `still_colored`, the PR ids in `notified`), which drops it."""
     def pr_jobs(pid: str) -> list[dict]:
         return [j for j in jobs if (j.get("pr") or {}).get("id") == pid]
 
     out, held_now = [], set()
     for pr, color, reason, evs in notes:
         js = pr_jobs(pr["id"])
-        if pr["kind"] == "others" and any(j.get("status") in UNFINISHED for j in js):
+        if any(j.get("status") in UNFINISHED for j in js):
             pending[pr["id"]] = {
-                "pr": {k: pr[k] for k in ("id", "kind", "repo", "number", "title", "url",
-                                          "author", "head")},
+                "pr": {k: pr.get(k) for k in ("id", "kind", "repo", "number", "title", "url",
+                                              "author", "head")},
                 "events": [{k: e.get(k) for k in _EVENT_KEYS} for e in evs],
-                "rerequested_at": ev.pending_rerequest(pr, me) if "reviews" in pr else "",
-                "since": now}
+                "rerequested_at": (ev.pending_rerequest(pr, me)
+                                   if "reviews" in pr and pr["kind"] == "others" else ""),
+                "since": now, "color": color, "reason": reason}
             held_now.add(pr["id"])
         else:
             out.append((pr, color, reason, evs, js))
@@ -239,6 +250,10 @@ def hold_for_drafts(notes: list[tuple[dict, str, str, list[dict]]], pending: dic
         if any(j.get("status") in UNFINISHED for j in js) and waited < timedelta(minutes=max_minutes):
             continue
         pending.pop(pid)
+        if p["pr"].get("kind") == "mine":
+            if still_colored is None or pid in still_colored:
+                out.append((p["pr"], p.get("color"), p.get("reason") or "", p["events"], js))
+            continue
         known = "approved_by" in p["pr"]
         f = priority.followup(js, nick, author=p["pr"]["author"],
                               rerequested_at=p.get("rerequested_at") or "",
@@ -266,14 +281,15 @@ def _report_page(pr: dict, ready: list[dict], cfg: dict) -> str:
 
 
 def notification_href(pr: dict, pr_jobs: list[dict], cfg: dict, dry_run: bool) -> str:
-    """Where clicking the notification goes, always somewhere that exists: your PRs
-    open a Claude session on the comments; a follow-up or mention opens Claude's
-    drafted replies; a re-request, or responses whose drafts failed, open GitHub."""
-    if pr["kind"] == "mine":
-        import session
-        return session.respond_url(pr["url"])
+    """Where clicking the notification goes, always somewhere that exists: Claude's
+    drafted replies as a page, for comments on your PR or a follow-up or mention on
+    someone else's; with no drafts ready, your PR opens a Claude session on its
+    comments, and a re-request or responses whose drafts failed open GitHub."""
     ready = [j for j in pr_jobs if j.get("status") == "ready" and j.get("report")
              and Path(j["report"]).exists()]
+    if pr["kind"] == "mine" and not ready:
+        import session
+        return session.respond_url(pr["url"])
     if ready:
         if dry_run:
             return f"(page of Claude's drafted replies: {', '.join(j['report'] for j in ready)})"
@@ -441,10 +457,19 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
     notes = notifications(detail, events, jobs, notified, state.load_cleared(), now_iso,
                           lambda pr, js: pr_priority(pr, cfg, js, groups_now),
                           seed=seeding or seed_colors)
+    new_answers, stale = plan_answers(detail, groups_now, jobs, autofix.all_jobs(), now_iso)
+    if not dry_run:
+        for jid, why in stale:
+            followup.clear(jid, why)
+        for job in new_answers:
+            followup.enqueue_answer(job)
+    stale_ids = {jid for jid, _ in stale}
+    jobs = [j for j in jobs if j["id"] not in stale_ids] + new_answers
     pending = {} if replay else st.get("pending", {})
     ready = hold_for_drafts(notes, pending, jobs + event_jobs(events, jobs, now_iso), now_iso,
                             names.book(fetch=True), me,
-                            required=cfg["watcher"]["required_approvals"])
+                            required=cfg["watcher"]["required_approvals"],
+                            still_colored=set(notified))
     deliver(ready, cfg, dry_run)
     settled = {} if replay else settle_popups(popups.load(), set(detail), set(notified), closed,
                                               me, tok, cfg)
@@ -465,8 +490,11 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
         for pid, p in pending.items():
             print(f"[{notified.get(pid, {}).get('color')} · waits for Claude's drafted replies] "
                   f"{p['pr']['repo']}#{p['pr']['number']} · {p['pr']['title']}")
-        for jid, why in answered:
+        for jid, why in answered + stale:
             print(f"-- would clear follow-up {jid}: {why}")
+        for job in new_answers:
+            print(f"-- would draft a reply to {job['actor']}'s {job['kind']} on "
+                  f"{job['pr']['repo']}#{job['pr']['number']} ({job.get('url')})")
         for jid, outcome in rechecked:
             print(f"-- re-approval re-check for follow-up {jid}: {outcome}")
         for jid, why in fixes_answered:
@@ -649,6 +677,28 @@ def _refetch_menu() -> None:
     popup was just withdrawn leaves the menu in the same minute."""
     from review import auto_draft
     auto_draft.refresh_triage()
+
+
+def plan_answers(detail: dict[str, dict], groups_now: dict[str, dict], jobs: list[dict],
+                 fix_jobs: list[dict], now: str) -> tuple[list[dict], list[tuple[str, str]]]:
+    """(answer jobs to queue, (job id, why) to clear) for your PRs classified this tick
+    (`groups_now` carries each one's asks): a reply draft for each comment newly waiting
+    on you that no auto-fix is working on, and clearing for each whose comment no longer
+    waits on you (watcher/followup.py)."""
+    new, stale = [], []
+    for pid, g in groups_now.items():
+        pr = detail.get(pid)
+        if not pr or pr["kind"] != "mine":
+            continue
+        asks = g.get("asks") or []
+        fixing = {j.get("thread_id") for j in fix_jobs
+                  if (j.get("pr") or {}).get("id") == pid and j.get("status") in UNFINISHED}
+        roots = {t["id"]: (t["comments"][0]["id"] if t.get("comments") else None)
+                 for t in pr.get("threads") or []}
+        for ask in followup.answers_to_queue(pr, asks, jobs, fixing):
+            new.append(followup.answer_job(ev._pr_ref(pr), ask, roots.get(ask["thread_id"]), now))
+        stale += followup.stale_answers(pid, asks, jobs)
+    return new, stale
 
 
 def drafts_pass(cfg: dict, dry_run: bool = False, **kw) -> list[dict]:
