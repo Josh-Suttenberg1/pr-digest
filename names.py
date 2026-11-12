@@ -4,7 +4,8 @@
 reads the callers use (`get`, `in`, `[]`). A login whose profile has no name, or
 that couldn't be looked up, maps to itself through `get`.
 
-Names come from `gh api users/<login>` and are cached in state/names.json for
+A login listed in the config's `[names]` table shows that name instead, with no lookup.
+Other names come from `gh api users/<login>` and are cached in state/names.json for
 REFRESH_DAYS. Only a book made with fetch=True looks up logins it hasn't seen; the
 menu's instant render passes fetch=False and reads the cache, which the menu's
 background fetch and the watcher's tick keep filled.
@@ -52,8 +53,10 @@ def _save(path: Path, data: dict) -> None:
 
 
 class Book:
-    def __init__(self, fetch: bool, path: Path = CACHE, lookup=_gh_name, now=time.time):
+    def __init__(self, fetch: bool, path: Path = CACHE, lookup=_gh_name, now=time.time,
+                 overrides: dict[str, str] | None = None):
         self._fetch = fetch
+        self._overrides = overrides or {}
         self._path = path
         self._lookup = lookup
         self._now = now
@@ -62,6 +65,8 @@ class Book:
     def _resolve(self, login: str) -> str:
         if not login or login.startswith("team:") or login == "?":
             return ""
+        if self._overrides.get(login):
+            return self._overrides[login]
         hit = self._cache.get(login)
         fresh = hit and self._now() - hit.get("at", 0) < REFRESH_DAYS * 86400
         if fresh or not self._fetch:
@@ -86,5 +91,13 @@ class Book:
         return name
 
 
+def _overrides() -> dict[str, str]:
+    try:
+        table = settings.load().get("names") or {}
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in table.items() if isinstance(v, str) and v.strip()}
+
+
 def book(fetch: bool = False) -> Book:
-    return Book(fetch)
+    return Book(fetch, overrides=_overrides())

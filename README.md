@@ -121,7 +121,9 @@ start each PR's section with `## <TICKET> … avetta/<repo>#<n> … head <sha>` 
 with a `SEVERITY: substantive | nits-only | clean` line; see `review/review_pr.py`.
 
 **Names.** People show by their GitHub profile name, or their login when the profile
-has none. Nicknames belong in your own `CLAUDE.md`, which your Claude sessions read.
+has none. To show someone by another name, such as the nickname you use for them, list
+their login under `[names]` in your config (`plaxdan = "Woods"`); the menu,
+notifications and status files then use it.
 
 ## Run
 

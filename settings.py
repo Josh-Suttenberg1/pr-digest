@@ -28,6 +28,10 @@ DEFAULTS: dict = {
     "workspace": "~",
     # Where repo clones live, as <repos_root>/<repo>. Empty means the workspace.
     "repos_root": "",
+    # GitHub login -> the name to show for that person in the menu, notifications and
+    # status files, ahead of their GitHub profile name. A login missing here shows its
+    # profile name, or the login when the profile has none.
+    "names": {},
     "review": {
         "reviewer_agent": "pr-reviewer",
         "verifier_agent": "pr-review-verifier",

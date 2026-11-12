@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import names
@@ -19,8 +20,22 @@ class BookTest(unittest.TestCase):
         self.calls.append(login)
         return self.profiles.get(login)          # None: the lookup failed
 
-    def book(self, fetch, now=1_000_000):
-        return names.Book(fetch, self.path, self.lookup, lambda: now)
+    def book(self, fetch, now=1_000_000, overrides=None):
+        return names.Book(fetch, self.path, self.lookup, lambda: now, overrides)
+
+    def test_configured_name_wins_without_a_lookup(self):
+        b = self.book(fetch=True, overrides={"alovelace": "Ada", "noname": "Nemo"})
+        self.assertEqual(b.get("alovelace", "alovelace"), "Ada")
+        self.assertEqual(b["noname"], "Nemo")
+        self.assertIn("noname", b)
+        self.assertEqual(b.get("other", "other"), "other")
+        self.assertEqual(self.calls, ["other"])
+
+    def test_book_reads_the_names_table(self):
+        with mock.patch("settings.load", return_value={"names": {"alovelace": "Ada", "x": ""}}):
+            b = names.book()
+        self.assertEqual(b.get("alovelace"), "Ada")
+        self.assertEqual(b._overrides, {"alovelace": "Ada"})
 
     def test_fetching_book_looks_up_once_and_caches(self):
         b = self.book(fetch=True)

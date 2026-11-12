@@ -76,3 +76,8 @@ cli = "acli"
 cache_days = 7
 # A story row links to the ticket: browse_url + key. "" leaves it unlinked.
 browse_url = ""
+
+[names]
+# GitHub login -> the name the menu and notifications show for that person, ahead of
+# their GitHub profile name.
+# some-login = "Nickname"
