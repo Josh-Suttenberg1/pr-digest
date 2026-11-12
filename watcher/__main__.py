@@ -4,6 +4,10 @@
     python -m watcher status                           last poll, backoff, follow-ups
     python -m watcher post <job>[,<job>…] | dismiss <job>[,<job>…]   menu actions on follow-ups
     python -m watcher followup-run <job>               one follow-up (started by tick)
+    python -m watcher approve <PR id> <head>           approve someone else's PR (the menu's
+                                                       "Approve"; re-checks it's still ready)
+    python -m watcher settle                           one tick once any running tick ends;
+                                                       every menu action starts it (`settle`)
     python -m watcher autofix-run <job | comment link> [--dry-run]
                                                        one auto-fix (started by tick); --dry-run
                                                        runs it up to the commit and prints it
@@ -28,7 +32,10 @@ A PR notifies only when its color rises above the color it last notified at
 at the same or a lower color only updates the menu, and yellow → red pops up again.
 The stored color is dropped once the PR has no color (the row cleared: you answered,
 posted the drafted replies, re-reviewed) or you dismissed its menu row
-(state/watcher/cleared.json); the next response then notifies afresh. Uncolored
+(state/watcher/cleared.json); the next response then notifies afresh. The PR's popup
+is withdrawn then too. A menu action (Approve, Post, Dismiss) runs a tick right away
+(`settle`), so that happens seconds after the click; what you do on github.com or in
+a Claude session is picked up by the next scheduled tick. Uncolored
 activity, green review requests and approvals never notify.
 
 On others' PRs, the author's response to your standing change request outside any
@@ -38,6 +45,11 @@ PR goes red, its one popup waits for Claude's verdict on whether the change requ
 addressed, and a new review of yours, a comment, or the change request's dismissal
 clears it. Real commits are judged by `_real_work` (triage/reviews.py's rule, with your
 own commits ruled out).
+
+Each fetch of someone else's PR saves what your approval waits on as its state's
+`approval` (watcher/approval.py `needs`). Once Claude's follow-ups find your change
+request and blocking comments addressed, the PR's row and popup say "Ready to approve",
+and the menu's "Approve" posts the approval (`approve`, followup.approve).
 
 Comments on your PRs get drafted replies (watcher/followup.py answer jobs,
 `plan_answers`): each comment newly waiting on you that no auto-fix is working on
@@ -93,7 +105,7 @@ from watcher import events as ev  # noqa: E402
 from triage import mine as mine_triage  # noqa: E402
 from triage import comment_kind  # noqa: E402
 from triage import priority  # noqa: E402
-from watcher import autofix, followup, fyi, gh, popups, render, state  # noqa: E402
+from watcher import approval, autofix, followup, fyi, gh, popups, render, state  # noqa: E402
 
 LABEL = "com.josh.pr-digest-watcher"
 PLIST = Path(f"~/Library/LaunchAgents/{LABEL}.plist").expanduser()
@@ -178,11 +190,12 @@ def pr_priority(pr: dict, cfg: dict, jobs: list[dict],
             groups[pr["id"]] = {"group": p["group"], "reason": p["reason"],
                                 "asks": followup.answer_asks(row)}
         return p["color"], p["reason"]
-    f = priority.followup([j for j in jobs if (j.get("pr") or {}).get("id") == pr["id"]],
-                          nick, author=pr["author"],
+    pr_jobs = [j for j in jobs if (j.get("pr") or {}).get("id") == pr["id"]]
+    f = priority.followup(pr_jobs, nick, author=pr["author"],
                           rerequested_at=ev.pending_rerequest(pr, cfg["me"]),
                           approvals=len(pr.get("approved_by") or []),
-                          required=cfg["watcher"]["required_approvals"])
+                          required=cfg["watcher"]["required_approvals"],
+                          approval=approval.status(approval.needs(pr, cfg["me"]), pr_jobs))
     return (f["color"], f["reason"]) if f else (None, "")
 
 
@@ -248,7 +261,8 @@ _EVENT_KEYS = ("type", "actor", "state", "first_line", "count", "trigger", "path
 def hold_for_drafts(notes: list[tuple[dict, str, str, list[dict]]], pending: dict[str, dict],
                     jobs: list[dict], now: str, nick: dict[str, str], me: str,
                     max_minutes: int = PENDING_MAX_MINUTES, required: int = 2,
-                    still_colored: set[str] | None = None) -> list[tuple]:
+                    still_colored: set[str] | None = None,
+                    needs: dict[str, dict | None] | None = None) -> list[tuple]:
     """Which notifications go out now, as [(pr, color, reason, events, pr_jobs)].
 
     A PR whose drafts are still being written waits in `pending` (PR id -> {pr, events,
@@ -257,7 +271,8 @@ def hold_for_drafts(notes: list[tuple[dict, str, str, list[dict]]], pending: dic
     releases the ones whose jobs have all finished, or that waited longer than
     `max_minutes`. Someone else's PR is reclassified from its jobs then; yours goes out
     at the color it was held at, unless its row cleared meanwhile (it's no longer in
-    `still_colored`, the PR ids in `notified`), which drops it."""
+    `still_colored`, the PR ids in `notified`), which drops it. `needs` (PR id ->
+    watcher/approval.py needs) lets a released popup say the PR is ready to approve."""
     def pr_jobs(pid: str) -> list[dict]:
         return [j for j in jobs if (j.get("pr") or {}).get("id") == pid]
 
@@ -292,7 +307,8 @@ def hold_for_drafts(notes: list[tuple[dict, str, str, list[dict]]], pending: dic
         f = priority.followup(js, nick, author=p["pr"]["author"],
                               rerequested_at=p.get("rerequested_at") or "",
                               approvals=len(p["pr"]["approved_by"]) if known else None,
-                              required=required)
+                              required=required,
+                              approval=approval.status((needs or {}).get(pid), js))
         if f and f["color"]:
             out.append((p["pr"], f["color"], f["reason"], p["events"], f["jobs"]))
     return out
@@ -445,6 +461,8 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
     events, prs = [], dict(prev)
     for pid, pr in detail.items():
         found_events, prs[pid] = ev.diff_pr(pr, prev.get(pid), ctx)
+        if pr["kind"] == "others":
+            prs[pid]["approval"] = approval.needs(pr, me)
         events += found_events
     closed: dict[str, str] = {}     # PR id -> MERGED or CLOSED, for withdrawing its popups
     for pid in gone:
@@ -506,7 +524,8 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
     ready = hold_for_drafts(notes, pending, jobs + event_jobs(events, jobs, now_iso), now_iso,
                             names.book(fetch=True), me,
                             required=cfg["watcher"]["required_approvals"],
-                            still_colored=set(notified))
+                            still_colored=set(notified),
+                            needs={pid: v.get("approval") for pid, v in prs.items()})
     deliver(ready, cfg, dry_run)
     owed_urls = set(st["owed"]) if isinstance(st.get("owed"), dict) else None
     settled = {} if replay else settle_popups(popups.load(), set(detail), set(notified), closed,
@@ -773,6 +792,37 @@ def autofix_candidates(detail: dict[str, dict], prev: dict, ctx: ev.Ctx,
                                         cfg["autofix"]["categories"])]
 
 
+SETTLE_WAIT = 120   # seconds `settle` waits for a running tick to finish
+
+
+def settle(cfg: dict, wait: float = SETTLE_WAIT, sleep=time.sleep) -> int:
+    """One tick right after a menu action (Approve, Post this reply, Dismiss), so the
+    popup for what you just did is withdrawn, and the menu row updated, within seconds
+    instead of at the next scheduled tick. The tick does the deciding: it re-reads the
+    PR, clears the follow-ups you answered, and withdraws the popup only when nothing
+    is left on you (`settle_popups`); a PR that still needs you keeps it.
+
+    A tick already running may have read the PR before the action, so this waits for
+    it to finish (up to `wait` seconds) and then runs its own. If a scheduled tick
+    takes the lock in between, that tick started after the action and does the same."""
+    deadline = time.time() + wait
+    while (held := state.lock()) is None:
+        if time.time() > deadline:
+            return 0
+        sleep(1)
+    held.close()
+    return tick(cfg)
+
+
+def settle_soon(popen=subprocess.Popen) -> None:
+    """Start `settle` detached, logging to LOG, so the menu action returns at once."""
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a") as log:
+        popen([sys.executable, "-m", "watcher", "settle"], cwd=str(Path(__file__).resolve().parent.parent),
+              stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+              start_new_session=True)
+
+
 def _refresh_menu(cfg: dict) -> None:
     subprocess.run(["open", "-g", f"swiftbar://refreshplugin?name={cfg['notify']['swiftbar_plugin']}"],
                    capture_output=True)
@@ -901,6 +951,7 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--dry-run", action="store_true")
     t.add_argument("--since", help="with --dry-run: replay this window, e.g. 24h")
     sub.add_parser("status")
+    sub.add_parser("settle", help="one tick after a menu action, once a running tick ends")
     nt = sub.add_parser("notify-test")
     nt.add_argument("--withdraw-after", type=int, default=0, metavar="SECONDS",
                     help="withdraw both test popups this many seconds later")
@@ -908,6 +959,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("install")
     for name in ("post", "dismiss", "followup-run"):
         sub.add_parser(name).add_argument("job")
+    ap = sub.add_parser("approve", help="approve someone else's PR (the menu's Approve)")
+    ap.add_argument("pr", help="the PR's GraphQL node id")
+    ap.add_argument("head", help="the head commit the menu showed as ready")
     d = sub.add_parser("drafts")
     d.add_argument("--dry-run", action="store_true", help="say what it would do; change nothing")
     d.add_argument("--limit", type=int, help="start at most this many drafts or updates")
@@ -931,6 +985,8 @@ def main(argv: list[str] | None = None) -> int:
         return tick(cfg, args.dry_run, args.since)
     if args.cmd == "status":
         return status(cfg)
+    if args.cmd == "settle":
+        return settle(cfg)
     if args.cmd == "notify-test":
         return notify_test(cfg, args.withdraw_after)
     if args.cmd == "alert-app":
@@ -941,11 +997,18 @@ def main(argv: list[str] | None = None) -> int:
         # One job id, or several joined by commas ("Post the drafted replies").
         rc = max(followup.post(jid) for jid in args.job.split(",") if jid)
         _refresh_menu(cfg)
+        settle_soon()
         return rc
     if args.cmd == "dismiss":
         # One job id, or several joined by commas (a PR's row dismisses all its jobs).
         rc = max(followup.dismiss(jid) for jid in args.job.split(",") if jid)
         _refresh_menu(cfg)
+        settle_soon()
+        return rc
+    if args.cmd == "approve":
+        rc = followup.approve(args.pr, args.head, cfg)
+        _refresh_menu(cfg)
+        settle_soon()
         return rc
     if args.cmd == "followup-run":
         rc = followup.run(args.job, cfg)

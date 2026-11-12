@@ -1052,6 +1052,48 @@ def post(jid: str) -> int:
     return 0
 
 
+def approve(pr_id: str, head: str, cfg: dict) -> int:
+    """Post your approval of someone else's PR from the menu's "Approve" (the click is
+    your approval of approval.body's exact text). Re-reads the PR first and posts only
+    when watcher/approval.py still finds it ready on `head`, the commit the menu showed;
+    then clears the PR's follow-ups, since the approval answers them."""
+    from watcher import approval, gh
+    try:
+        snap = gh.details({pr_id: "others"}, set(cfg["watcher"]["bots"]), gh.token()).get(pr_id)
+    except (gh.GhError, gh.gh_prs.DigestError) as exc:
+        notify.banner("⚠️ Not approved", "Couldn't read the PR", str(exc)[:200])
+        return 1
+    if snap is None:
+        notify.banner("⚠️ Not approved", "Couldn't read the PR", pr_id)
+        return 1
+    jobs = all_jobs()
+    st = approval.status(approval.needs(snap, cfg["me"]), jobs)
+    why = ("the author pushed since the menu showed it; check again" if snap["head"] != head
+           else "" if st and st["ready"] else (st or {}).get("why") or "there's nothing to approve")
+    if why:
+        notify.banner("⚠️ Not approved", render.subtitle(snap), why)
+        return 1
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    payload = JOBS_DIR / f"{pr_id}.approve.json"
+    payload.write_text(json.dumps({"commit_id": head, "event": "APPROVE",
+                                   "body": approval.body(snap["repo"], head, st["verb"],
+                                                         cfg["org"])}))
+    proc = subprocess.run(["gh", "api", "-X", "POST",
+                           f"repos/{cfg['org']}/{snap['repo']}/pulls/{snap['number']}/reviews",
+                           "--input", str(payload), "--jq", ".html_url"],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        notify.banner("⚠️ Approval not posted", render.subtitle(snap), proc.stderr.strip()[:200])
+        return 1
+    url = proc.stdout.strip()
+    for j in jobs:
+        if (j.get("pr") or {}).get("id") == pr_id and j.get("status") in CLEARABLE:
+            clear(j["id"], "you approved the PR")
+    notify.banner("✅ Re-approved" if st["verb"] == "reapprove" else "✅ Approved",
+                  render.subtitle(snap), url, href=url)
+    return 0
+
+
 def dismiss(jid: str) -> int:
     job = load_job(jid)
     job.update(status="dismissed")

@@ -26,7 +26,9 @@ resolves nothing by itself.
 
 The watcher re-checks every PR with a popup out on every tick (`watched_ids`,
 `review_entries`), so a popup is withdrawn within one tick of the work being done,
-whether it was done from the menu, a Claude session or github.com.
+whether it was done from the menu, a Claude session or github.com. A menu action
+(Approve, Post, Dismiss) starts a tick at once (watcher/__main__.py `settle`), so its
+popup goes within seconds of the click.
 
 Several processes send popups (the watcher's tick, a draft run, an auto-fix run, a
 manual review), so every read-modify-write holds an flock on popups.lock.

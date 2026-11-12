@@ -67,6 +67,7 @@ REPO_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_DIR))
 
 from triage import priority  # noqa: E402
+from watcher import approval  # noqa: E402
 LAUNCHER = REPO_DIR / "swiftbar-plugins" / "prdigest.1h.sh"
 PLUGIN_ID = "prdigest.1h.sh"  # unique id for swiftbar://refreshplugin
 REVIEW_MENU = REPO_DIR / "review-drafter" / "menubar.sh"   # review actions backend
@@ -239,7 +240,8 @@ def write_status(data: dict) -> None:
         status_report.write(build_sections(data, _followup_jobs(), load_dismissed(), required,
                                            people, prio=_priority_settings(),
                                            autofix_jobs=_autofix_jobs(),
-                                           drafts=_draft_states(data)),
+                                           drafts=_draft_states(data),
+                                           approval_needs=_approval_needs()),
                             data, people, required=required)
     except Exception:  # noqa: BLE001 — the status files must never break the menu
         pass
@@ -361,7 +363,8 @@ def build_sections(data: dict, followup_jobs: list[dict],
                    dismissed: dict[str, str] | None = None, required: int = 2,
                    nick: dict[str, str] | None = None, now: datetime | None = None,
                    prio: dict | None = None, autofix_jobs: list[dict] | None = None,
-                   drafts: dict[str, dict] | None = None) -> dict:
+                   drafts: dict[str, dict] | None = None,
+                   approval_needs: dict[str, dict] | None = None) -> dict:
     """Sort cached data into the menu's sections through triage/priority.py.
 
     Returns {"mine", "mine_drafts", "followups", "owed", "other", "others_needs",
@@ -387,6 +390,10 @@ def build_sections(data: dict, followup_jobs: list[dict],
     are on (`_draft_states`): a review you owe shows its draft's state, and stays off
     the menu until its draft is ready (priority.classify).
 
+    `approval_needs` (PR url → watcher/approval.py `needs`, saved by the watcher;
+    `_approval_needs`) is held against `followup_jobs` here, so a follow-up's entry
+    says "Ready to approve" as soon as Claude's last verdict is in.
+
     `title` is the menu-bar title (priority.title) and `count` the PRs it counts."""
     nick = nick or {}
     now = now or datetime.now(timezone.utc)
@@ -396,7 +403,9 @@ def build_sections(data: dict, followup_jobs: list[dict],
         data.get("mine") or [], reviews, followup_jobs, nick=nick, now=now,
         required=required, stale_after_days=prio["stale_after_days"],
         max_engaged=prio["max_engaged_for_stale"], dismissed=dismissed or {},
-        autofix=autofix_jobs or [], pod=frozenset(prio.get("pod") or ()), drafts=drafts)
+        autofix=autofix_jobs or [], pod=frozenset(prio.get("pod") or ()), drafts=drafts,
+        approvals={url: approval.status(n, followup_jobs)
+                   for url, n in (approval_needs or {}).items()})
 
     ranked = {st.get("pr_url"): i for i, st in enumerate(reviews.get("needs_you") or [])}
     mine_rows = [e for e in entries if e["section"] == priority.MINE]
@@ -1116,14 +1125,28 @@ def reapproval_hold(jobs: list[dict]) -> str:
     return "" if why in _NOT_IN_PLAY else f"Not re-approving: {why}"
 
 
+def approval_text(ok: dict) -> str:
+    """approval.body's text as the menu shows it: links reduced to their short sha."""
+    text = approval.body(ok["repo"], ok["head"], ok["verb"], _org())
+    return sanitize(re.sub(r"\[([0-9a-f]+)\]\([^)]*\)", r"\1", text))
+
+
 def followup_block(e: dict, nick: dict[str, str]) -> None:
     """Others' PR you reviewed, where someone responded: every response in one place,
-    each with its own submenu, then the PR's actions."""
+    each with its own submenu, then the PR's actions. When Claude found everything your
+    review asked for addressed (the entry's `approval`, watcher/approval.py), the
+    actions lead with "Approve", which posts `approval_text` (the click is your
+    approval), and the row's why says so; otherwise a grey line says what holds an
+    approval back."""
     url = e["url"]
     st = e.get("st") or {}
     jobs = e.get("jobs") or []
+    ok = e.get("approval") or {}
     emit(row_text(e), href=url)
     _pr_header(e)
+    if ok.get("why"):
+        emit(f"--Not ready to approve: {truncate(sanitize(ok['why']), 100)}",
+             color="#888888", tooltip=sanitize(ok["why"]))
     if st.get("rerequested_at"):
         emit(f"--{_who(st.get('author', ''), nick)} re-requested your review "
              f"{when(st['rerequested_at'])}", color="#888888")
@@ -1142,6 +1165,12 @@ def followup_block(e: dict, nick: dict[str, str]) -> None:
         if held:
             emit(f"--{truncate(sanitize(held), 110)}", color="#888888")
     emit("-----")
+    if ok.get("ready"):
+        text = approval_text(ok)
+        emit("--Re-approve" if ok["verb"] == "reapprove" else "--Approve", bash=str(WATCHER),
+             param1="approve", param2=ok["pr_id"], param3=ok["head"], terminal="false",
+             refresh="true", sfimage="checkmark.seal", tooltip=text)
+        emit(f"--Posts: {truncate(text, 100)}", color="#888888", tooltip=text)
     ready = [j for j in jobs if j["status"] == "ready"]
     if len(ready) == 1:
         _read_item("--Read Claude's follow-up", ready[0]["report"])
@@ -1336,12 +1365,32 @@ def dismiss(url: str, acted_at: str, job_ids: str = "") -> None:
         pass
 
 
+def _settle_soon() -> None:
+    """Have the watcher run a tick now (watcher/__main__.py `settle`), so a dismissed
+    row's popup is withdrawn within seconds."""
+    try:
+        from watcher import __main__ as watcher_main
+        watcher_main.settle_soon()
+    except Exception:  # noqa: BLE001 — the menu must keep working without the watcher
+        pass
+
+
 def _followup_jobs() -> list[dict]:
     try:
         from watcher import followup
         return followup.all_jobs()
     except Exception:  # noqa: BLE001 — the menu must render even if the watcher can't load
         return []
+
+
+def _approval_needs() -> dict[str, dict]:
+    """PR url → what your approval waits on (watcher/approval.py `needs`), from the
+    watcher's state file; {} when it can't be read."""
+    try:
+        prs = json.loads((REPO_DIR / "state" / "watcher" / "state.json").read_text())["prs"]
+        return {n["url"].rstrip("/"): n for n in (v.get("approval") for v in prs.values()) if n}
+    except Exception:  # noqa: BLE001 — the menu must render even if the state can't load
+        return {}
 
 
 def _autofix_jobs() -> list[dict]:
@@ -1470,6 +1519,7 @@ def main() -> int:
             rest = args[i + 1:] + ["", "", ""]
             if rest[0]:
                 dismiss(rest[0], rest[1], rest[2])
+                _settle_soon()
             trigger_refresh()
             return 0
 
@@ -1489,7 +1539,8 @@ def main() -> int:
     sections = build_sections(cache if have_data else {}, _followup_jobs(), load_dismissed(),
                               required, nick, prio=_priority_settings(),
                               autofix_jobs=_autofix_jobs(),
-                              drafts=_draft_states(cache) if have_data else None)
+                              drafts=_draft_states(cache) if have_data else None,
+                              approval_needs=_approval_needs())
     sections["fyi"] = fyi_items()
     render_menu(sections, spinner=fetching, error=cache.get("error"),
                 have_data=have_data, nick=nick, required=required)

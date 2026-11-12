@@ -477,11 +477,17 @@ def _mine_not_on_you(row: dict, nick: dict[str, str], required: int, now: dateti
 
 def followup(jobs: list[dict], nick: dict[str, str], *, author: str = "",
              rerequested_at: str = "", dismissed_at: str | None = None,
-             approvals: int | None = None, required: int = 2) -> dict | None:
+             approvals: int | None = None, required: int = 2,
+             approval: dict | None = None) -> dict | None:
     """Others' PR with something for you: the responses since your last comment and
     the @mentions of you (the watcher's follow-up jobs for the PR, any status) and a
     pending re-request. None when there's none of these, so it isn't a follow-up.
-    `approvals`, when known, ends the reason with the PR's approval tally."""
+    `approvals`, when known, ends the reason with the PR's approval tally.
+
+    `approval` is watcher/approval.py `status` for the PR. When it's ready (Claude
+    found everything your review asked for addressed), the row is red and leads with
+    it: 'Ready to approve · DaVinci addressed your blocking comment and change request'.
+    Mentions still follow it, since approving doesn't answer them."""
     every = [j for j in jobs if j.get("status") in ACTIVE_JOBS]
     if not every and not rerequested_at:
         return None
@@ -543,6 +549,15 @@ def followup(jobs: list[dict], nick: dict[str, str], *, author: str = "",
         n = len(mentions)
         parts.append(f"{who_} mentioned you" + (f" {n} times" if n > 1 else ""))
         why.insert(0, f"{who_} mentioned you")
+    if approval and approval.get("ready"):
+        color = RED
+        parts = [f"{approval['label']} · {who(author, nick)} addressed {approval['what']}"]
+        why = [f"Claude found {approval['what']} addressed; approving is one click"]
+        if mentions:
+            who_ = names(_unique(j.get("actor") or "" for j in mentions), nick)
+            parts.append(f"{who_} mentioned you" + (f" {len(mentions)} times"
+                                                     if len(mentions) > 1 else ""))
+            why.append(f"{who_} mentioned you")
     if approvals is not None:
         parts.append(tally(approvals, required))
     reason = " · ".join(parts)
@@ -553,7 +568,7 @@ def followup(jobs: list[dict], nick: dict[str, str], *, author: str = "",
             "why": ("You dismissed this; it comes back when something new arrives"
                     if dismissed else f"Why it's {label}: " + "; ".join(why)),
             "waiting_since": min(stamps, default=""), "activity_at": activity,
-            "dismissed": dismissed, "jobs": every}
+            "dismissed": dismissed, "jobs": every, "approval": approval}
 
 
 _CR_VERBS = {"pushed": "pushed commits", "commented": "commented",
@@ -822,13 +837,15 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
              stale_after_days: float = 2, max_engaged: int = 1,
              dismissed: dict[str, str] | None = None,
              autofix: list[dict] | None = None, pod=frozenset(),
-             drafts: dict[str, dict] | None = None) -> list[dict]:
+             drafts: dict[str, dict] | None = None,
+             approvals: dict[str, dict] | None = None) -> list[dict]:
     """One entry per PR: {url, title, section, color, reason, why, waiting_since,
     activity_at, dismissed, row | st, jobs}. `pod` holds the logins whose PRs are
     red reviews from the start (`owed`). `reviews` is review_triage's buckets
     (needs_you in ranked order); `jobs` every follow-up job; `dismissed` url → the
     activity time it was dismissed at; `autofix` every auto-fix job, which only your
-    PRs carry (an entry's `autofix`).
+    PRs carry (an entry's `autofix`); `approvals` url → watcher/approval.py `status`,
+    which a follow-up's entry carries as `approval` (`followup`).
 
     Answer jobs (follow-up jobs with `trigger` "answer", drafted replies to comments on
     your PRs) ride on your PR's entry as `answers`, never as follow-ups; while one is
@@ -876,7 +893,8 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
             f = followup(by_url.get(url, []), nick, author=st.get("author", ""),
                          rerequested_at=st.get("rerequested_at") or "",
                          dismissed_at=dismissed.get(url),
-                         approvals=len(st.get("approvals") or []), required=required)
+                         approvals=len(st.get("approvals") or []), required=required,
+                         approval=(approvals or {}).get(url))
             mine_state = (st.get("mine") or [None])[0]
             fresh = not (st.get("mine") or st.get("commented")) or mine_state == "DISMISSED"
             if f:
@@ -900,7 +918,8 @@ def classify(mine_rows: list[dict], reviews: dict[str, list[dict]], jobs: list[d
     for url, js in by_url.items():
         if url in placed:
             continue
-        f = followup(js, nick, dismissed_at=dismissed.get(url))
+        f = followup(js, nick, dismissed_at=dismissed.get(url),
+                     approval=(approvals or {}).get(url))
         if f:
             placed.add(url)
             out.append({**f, "url": url, "title": (js[0].get("pr") or {}).get("title", ""),
