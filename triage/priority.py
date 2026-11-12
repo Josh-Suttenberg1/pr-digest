@@ -36,13 +36,19 @@ Every PR lands in exactly one section, with at most one color:
   Follow-ups and mentions (`FOLLOWUP`), others' PRs you reviewed or commented on where
   someone responded since your last comment, and any PR where someone @mentioned you:
     red      someone @mentioned you; the author re-requested your review (whatever
-             your earlier decision); or a response landed in one of your blocking
+             your earlier decision); a response landed in one of your blocking
              threads: a reply, or the code under it changed (the watcher's reply /
-             outdated / moved triggers).
+             outdated / moved triggers); or, while your change request stands (it is
+             your latest decision), the author answered it outside any thread: real
+             commits since your last review or comment, a top-level comment, or a
+             review with a body (the watcher's change_request jobs).
     yellow   the only responses are on non-blocking threads.
-  A PR you engaged with that has none of these (say the author pushed commits that
-  touch none of your threads, or commented without mentioning you) is Waiting on
-  others: the author is still working.
+  Each clears when you answer it: a new review of yours clears them all, and a
+  change request's response also clears when you comment on the PR or the change
+  request is dismissed (watcher/followup.py cleared_jobs).
+  A PR you engaged with that has none of these is Waiting on others: the author is
+  still working. That covers commits that touch none of your threads, or a comment
+  that doesn't mention you, on a PR you only commented on.
 
   Reviews you owe (`OWED`), others' PRs you haven't reviewed, or whose review of yours
   was dismissed. A teammate's PR (`[triage] team`, `team_pr`) is one of them whether or
@@ -215,10 +221,11 @@ def job_blocking(job: dict) -> bool:
 
 
 def followup_color(blocking: list[bool], rerequested: bool,
-                   mentioned: bool = False) -> str | None:
-    """The follow-up rule on its own: red for a mention, a re-request or any response
-    in a blocking thread, yellow for responses only in non-blocking ones."""
-    if mentioned or rerequested or any(blocking):
+                   mentioned: bool = False, change_request: bool = False) -> str | None:
+    """The follow-up rule on its own: red for a mention, a re-request, a response to
+    your standing change request, or any response in a blocking thread; yellow for
+    responses only in non-blocking ones."""
+    if mentioned or rerequested or change_request or any(blocking):
         return RED
     return YELLOW if blocking else None
 
@@ -480,9 +487,10 @@ def followup(jobs: list[dict], nick: dict[str, str], *, author: str = "",
         return None
     author = author or ((every[0].get("pr") or {}).get("author") if every else "")
     mentions = [j for j in every if j.get("trigger") == "mention"]
-    active = [j for j in every if j.get("trigger") != "mention"]
+    answers = [j for j in every if j.get("trigger") == "change_request"]
+    active = [j for j in every if j.get("trigger") not in ("mention", "change_request")]
     blocking = [job_blocking(j) for j in active]
-    color = followup_color(blocking, bool(rerequested_at), bool(mentions))
+    color = followup_color(blocking, bool(rerequested_at), bool(mentions), bool(answers))
     stamps = [j.get("created_at") or "" for j in every] + [rerequested_at]
     stamps = [s for s in stamps if s]
     activity = max(stamps, default="")
@@ -523,6 +531,13 @@ def followup(jobs: list[dict], nick: dict[str, str], *, author: str = "",
                        + ("s" if changed > 1 else ""))
         if color == YELLOW:
             why.append("the responses are all on comments that weren't blocking")
+    if answers:
+        words, said = _cr_response(answers, author, nick)
+        if rerequested_at and not active and parts:
+            parts[-1] += " and " + words.split(" ", 1)[1]
+        else:
+            parts.append(words)
+        why.append(said)
     if mentions:
         who_ = names(_unique(j.get("actor") or "" for j in mentions), nick)
         n = len(mentions)
@@ -539,6 +554,29 @@ def followup(jobs: list[dict], nick: dict[str, str], *, author: str = "",
                     if dismissed else f"Why it's {label}: " + "; ".join(why)),
             "waiting_since": min(stamps, default=""), "activity_at": activity,
             "dismissed": dismissed, "jobs": every}
+
+
+_CR_VERBS = {"pushed": "pushed commits", "commented": "commented",
+             "review": "answered in a review"}
+_VERDICT_WORDS = {"addressed": "addressed", "partly": "partly addressed",
+                  "not_addressed": "not addressed"}
+
+
+def _cr_response(jobs: list[dict], author: str, nick: dict[str, str]) -> tuple[str, str]:
+    """(row words, why) for the author's responses to your change request, from its
+    newest job (each newer one covers everything since your last touch):
+    'Daniel pushed commits and commented since your change request · Claude: partly
+    addressed'."""
+    job = max(jobs, key=lambda j: j.get("created_at") or "")
+    triggers = [t for t in _CR_VERBS if any(t in (j.get("triggers") or [j.get("trigger")])
+                                            for j in jobs)]
+    actor = who(job.get("actor") or author, nick)
+    verbs = [_CR_VERBS[t] for t in triggers] or ["responded"]
+    did = verbs[0] if len(verbs) == 1 else ", ".join(verbs[:-1]) + " and " + verbs[-1]
+    words = f"{actor} {did} since your change request"
+    if job.get("status") == "ready" and job.get("verdict") in _VERDICT_WORDS:
+        words += f" · Claude: {_VERDICT_WORDS[job['verdict']]}"
+    return words, f"{actor} {did} while your change request stands"
 
 
 # --- Reviews you owe ----------------------------------------------------------------
@@ -668,7 +706,9 @@ def _not_on_you(base: dict, st: dict, now: datetime, required: int = 2) -> dict:
     """Someone else's PR with nothing for you. One you left comments or a change
     request on, whose author hasn't responded to them (other_reason orders 0 and 1),
     is Waiting on others: no dot, aged from your latest review. The rest is Nothing
-    needed (⚪)."""
+    needed (⚪). While your change request stands, the author's commits or comments
+    reach here only once you've answered them (a new review or a comment); until then
+    the watcher's change_request job makes the PR a follow-up."""
     e = _low(base, *other_reason(st))
     if e["order"] not in WAITING_ORDERS:
         return e

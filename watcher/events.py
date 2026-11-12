@@ -32,6 +32,20 @@ your last review or comment there (`pending_rerequest`), once per request event,
 "mention" event for each human comment, review body or inline comment that @mentions
 you (`_diff_mentions`), once per item. A mention inside a thread you're already in
 is left to that thread's reply event.
+
+And while your change request stands on someone else's PR (your latest APPROVED /
+CHANGES_REQUESTED / DISMISSED review is CHANGES_REQUESTED, `standing_change_request`),
+a "change_request" event fires for the author's responses to it that no thread
+covers (`_diff_change_request`), at most one per tick, folding in every new one:
+  pushed     real commits landed since your last review or comment
+             (ctx.real_work: base-branch merges, whitespace-only commits and your own
+             commits don't count)
+  commented  the author left a top-level comment after it
+  review     the author submitted a review with a body after it
+An item that @mentions you is left to its mention event. The arm is your latest
+touch on the PR (`my_last_touch`); a new review or comment of yours re-arms it, so
+only responses after that count. Each response fires once (its key: the head sha,
+ic:<id> or rv:<id>). An approval or a dismissal of your change request disarms it.
 """
 
 from __future__ import annotations
@@ -56,6 +70,12 @@ class Ctx:
     # (repo, base_sha, head_sha) -> set of changed paths, or None when unknown.
     paths_changed: Callable[[str, str, str], set[str] | None] = field(
         default=lambda repo, base, head: None
+    )
+    # (repo, number, base_sha, head_sha) -> whether real commits by someone other than
+    # you landed between them (triage/reviews.py's rule), None when unknown. Unknown
+    # counts as real, so a response is never hidden.
+    real_work: Callable[[str, int, str, str], bool | None] = field(
+        default=lambda repo, number, base, head: None
     )
 
 
@@ -355,6 +375,101 @@ def _diff_mentions(pr: dict, prev: dict | None, ctx: Ctx) -> tuple[list[dict], l
     return events, ids
 
 
+# --- responses to your change request on others' PRs --------------------------------
+
+
+def standing_change_request(pr: dict, me: str) -> dict | None:
+    """Your change request when it is your latest decision on the PR (APPROVED,
+    CHANGES_REQUESTED or DISMISSED, in submission order); None otherwise."""
+    decisions = [r for r in sorted(pr["reviews"], key=lambda r: r.get("submitted_at") or "")
+                 if r["author"] == me and r["state"] in ("APPROVED", "CHANGES_REQUESTED",
+                                                         "DISMISSED")]
+    return decisions[-1] if decisions and decisions[-1]["state"] == "CHANGES_REQUESTED" else None
+
+
+def _my_inline(pr: dict, review_id) -> list[dict]:
+    """Your inline comments that came with a review: {path, line, body}."""
+    return [{"path": t["path"], "line": t.get("line") or t.get("original_line"),
+             "body": c.get("body") or ""}
+            for t in pr["threads"] for c in t["comments"] if c.get("review_id") == review_id]
+
+
+_CR_TRIGGERS = ("pushed", "review", "commented")
+
+
+def _diff_change_request(pr: dict, prev: dict | None, ctx: Ctx
+                         ) -> tuple[list[dict], dict | None]:
+    """The author's responses to your standing change request since the last tick, as
+    at most one "change_request" event, and the arm to save (None when no change
+    request of yours stands). `prev` is the PR's whole saved state."""
+    me, author = ctx.me, pr["author"]
+    cr = standing_change_request(pr, me)
+    if cr is None:
+        return [], None
+    since = my_last_touch(pr, me)
+    old = (prev or {}).get("cr")
+    # A PR saved before change requests were tracked: every response since your last
+    # touch is news, whatever the cutoff.
+    upgrade = prev is not None and "cr" not in prev
+    if old and old.get("review_id") == cr["id"] and old.get("since") == since:
+        arm = {**old, "fired": list(old.get("fired") or [])}
+    else:
+        mine = [r for r in pr["reviews"] if r["author"] == me and r["state"] != "PENDING"]
+        latest = max(mine, key=lambda r: r.get("submitted_at") or "", default=cr)
+        # Your latest touch is a review: its commit. A top-level comment carries none,
+        # so a live re-arm takes the head it saw; otherwise the review's commit stands.
+        live = old is not None and (latest.get("submitted_at") or "") != since
+        arm = {"review_id": cr["id"], "since": since, "fired": [],
+               "base": pr["head"] if live else (latest.get("commit") or cr.get("commit") or "")}
+
+    rx = mention_re(me)
+    found: list[tuple[str, str, dict]] = []      # (trigger, key, item)
+    for c in pr["issue_comments"]:
+        if (c["author"] == author and _human(c, me) and (c.get("created_at") or "") > since
+                and not rx.search(c.get("body") or "")):
+            found.append(("commented", f"ic:{c['id']}", {**c, "at": c.get("created_at")}))
+    for r in pr["reviews"]:
+        if (r["author"] == author and _human(r, me) and r["state"] != "PENDING"
+                and (r.get("body") or "").strip() and (r.get("submitted_at") or "") > since
+                and not rx.search(r.get("body") or "")):
+            found.append(("review", f"rv:{r['id']}", {**r, "at": r.get("submitted_at")}))
+    fired = set(arm["fired"])
+    head_key = f"push:{pr['head']}"
+    if pr["head"] and arm["base"] and pr["head"] != arm["base"] and head_key not in fired:
+        real = (None if ctx.seeding
+                else ctx.real_work(pr["repo"], pr["number"], arm["base"], pr["head"]))
+        if real is False:
+            fired.add(head_key)              # a base merge or whitespace: never news
+        else:
+            found.append(("pushed", head_key, {"at": "", "url": f"{pr['url']}/files"}))
+
+    new = [(t, k, i) for t, k, i in found if k not in fired]
+    arm["fired"] = sorted(fired | {k for _, k, _ in new})
+    first_sight = prev is None
+    if ctx.seeding:
+        return [], arm
+    if first_sight and not upgrade:
+        new = [(t, k, i) for t, k, i in new
+               if t == "pushed" or _after_cutoff(i.get("at"), ctx.cutoff)]
+    if not new:
+        return [], arm
+    triggers = [t for t in _CR_TRIGGERS if any(x == t for x, _, _ in new)]
+    said = [i for t, _, i in new if t != "pushed"]
+    first = said[0] if said else None
+    return [{
+        "type": "change_request", "trigger": triggers[0], "triggers": triggers,
+        "pr": _pr_ref(pr), "actor": author, "review_id": cr["id"],
+        "response_key": ",".join(sorted(k for _, k, _ in new)),
+        "arm_commit": arm["base"], "head": pr["head"], "since": since,
+        "my_comment": cr.get("body") or "", "my_comment_url": cr.get("url"),
+        "my_inline": _my_inline(pr, cr["id"]),
+        "responses": [{"trigger": t, "body": i.get("body") or "", "url": i.get("url"),
+                       "at": i.get("at")} for t, _, i in new],
+        "url": (first or {}).get("url") or f"{pr['url']}/files",
+        "first_line": _first_line((first or {}).get("body") or ""), "blocking": True,
+    }], arm
+
+
 # --- entry point -----------------------------------------------------------------
 
 
@@ -372,9 +487,10 @@ def diff_pr(pr: dict, prev: dict | None, ctx: Ctx) -> tuple[list[dict], dict]:
         events, threads = _diff_threads(pr, (prev or {}).get("threads", {}), first_sight, ctx)
         rerequests, requests_seen = _diff_rerequests(pr, prev, ctx)
         mentions, mentions_seen = _diff_mentions(pr, prev, ctx)
-        events += rerequests + mentions
+        answers, cr = _diff_change_request(pr, prev, ctx)
+        events += rerequests + mentions + answers
         state = {"kind": "others", "seen": [], "threads": threads,
-                 "requests_seen": requests_seen, "mentions_seen": mentions_seen}
+                 "requests_seen": requests_seen, "mentions_seen": mentions_seen, "cr": cr}
     state.update({"repo": pr["repo"], "number": pr["number"], "updated_at": pr["updated_at"],
                   "head": pr["head"], "missing_ticks": 0})
     return events, state

@@ -53,13 +53,15 @@ def _event_line(event: dict, people: dict[str, str]) -> str:
         return f"{name} re-requested your review"
     if kind == "mention":
         return f"{name} mentioned you: {line}" if line else f"{name} mentioned you"
+    if kind == "change_request":
+        return f"{name}: {line}" if line else f"{name} pushed commits"
     return ""
 
 
 # Which event names the notification when a tick brings several: the one that most
 # needs an answer first.
-_TRIGGER_ORDER = {"CHANGES_REQUESTED": 0, "mention": 1, "rerequest": 2, "thread": 3,
-                  "comments": 4, "APPROVED": 5}
+_TRIGGER_ORDER = {"CHANGES_REQUESTED": 0, "mention": 1, "rerequest": 2,
+                  "change_request": 3, "thread": 4, "comments": 5, "APPROVED": 6}
 
 
 def _trigger_rank(event: dict) -> tuple[int, bool]:
@@ -93,6 +95,10 @@ def _trigger(event: dict, people: dict[str, str], key: str) -> str:
         return f"{name} re-requested your review on {key}"
     if kind == "mention":
         return f"{name} mentioned you on {key}"
+    if kind == "change_request":
+        if event.get("trigger") == "pushed":
+            return f"{name} pushed commits since your change request on {key}"
+        return f"{name} answered your change request on {key}"
     return ""
 
 

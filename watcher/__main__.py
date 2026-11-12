@@ -31,6 +31,14 @@ posted the drafted replies, re-reviewed) or you dismissed its menu row
 (state/watcher/cleared.json); the next response then notifies afresh. Uncolored
 activity, green review requests and approvals never notify.
 
+On others' PRs, the author's response to your standing change request outside any
+thread (real commits, a top-level comment or a review body; watcher/events.py
+`_diff_change_request`) queues a change-request follow-up like a thread response: the
+PR goes red, its one popup waits for Claude's verdict on whether the change request is
+addressed, and a new review of yours, a comment, or the change request's dismissal
+clears it. Real commits are judged by `_real_work` (triage/reviews.py's rule, with your
+own commits ruled out).
+
 Comments on your PRs get drafted replies (watcher/followup.py answer jobs,
 `plan_answers`): each comment newly waiting on you that no auto-fix is working on
 queues one, the PR's popup waits for them like a follow-up's, and then opens them.
@@ -129,6 +137,26 @@ def _paths_changed(tok: str):
     return changed
 
 
+def _real_work(tok: str, org: str, me: str):
+    """ctx.real_work: whether real commits by someone other than you landed between two
+    shas (triage/reviews.py `_new_work_since`, which needs the repo cloned and errs
+    toward True). None when GitHub can't be read."""
+    def check(repo: str, number: int, base: str, head: str) -> bool | None:
+        try:
+            data = gh_prs._get(f"{gh_prs.API_ROOT}/repos/{org}/{repo}/compare/{base}...{head}", tok)
+        except gh_prs.DigestError:
+            return None
+        commits = data.get("commits") or []
+        mine = {(c.get("sha") or "").lower() for c in commits
+                if ((c.get("author") or {}).get("login") or "") == me}
+        if commits and len(mine) == len(commits):
+            return False
+        from triage import reviews
+        return reviews._new_work_since(f"{org}/{repo}", number, base, head,
+                                       passes=lambda _git, sha: sha.lower() in mine)
+    return check
+
+
 def pr_priority(pr: dict, cfg: dict, jobs: list[dict],
                 groups: dict[str, dict] | None = None) -> tuple[str | None, str]:
     """(color, reason) for one PR snapshot, through triage/priority.py. Your PRs take
@@ -158,20 +186,26 @@ def pr_priority(pr: dict, cfg: dict, jobs: list[dict],
     return (f["color"], f["reason"]) if f else (None, "")
 
 
+JOB_EVENTS = ("thread", "mention", "change_request")
+
+
 def _event_job(e: dict, now: str) -> dict:
-    """A thread or mention event in the shape of the follow-up job it queues, so a dry
-    run classifies this tick's responses the same way as a real one."""
+    """A thread, mention or change-request event in the shape of the follow-up job it
+    queues, so a dry run classifies this tick's responses the same way as a real one."""
+    trigger = e["type"] if e["type"] in ("mention", "change_request") else e.get("trigger")
     return {"id": followup.event_job_id(e), "status": "queued", "created_at": now,
-            "pr": e["pr"], "trigger": "mention" if e["type"] == "mention" else e.get("trigger"),
+            "pr": e["pr"], "trigger": trigger,
             **{k: e.get(k) for k in ("actor", "thread_id", "arm_id", "path", "line", "url",
-                                     "blocking", "where", "comment_id", "body", "mentioned_at")}}
+                                     "blocking", "where", "comment_id", "body", "mentioned_at",
+                                     "review_id", "triggers", "my_comment")}}
 
 
 def event_jobs(events: list[dict], jobs: list[dict], now: str) -> list[dict]:
-    """Jobs for this tick's thread and mention events that aren't queued yet."""
+    """Jobs for this tick's thread, mention and change-request events that aren't
+    queued yet."""
     known = {j["id"] for j in jobs}
     return [_event_job(e, now) for e in events
-            if e["type"] in ("thread", "mention") and followup.event_job_id(e) not in known]
+            if e["type"] in JOB_EVENTS and followup.event_job_id(e) not in known]
 
 
 def notifications(detail: dict[str, dict], events: list[dict], jobs: list[dict],
@@ -405,7 +439,8 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
     else:
         last_ok = st.get("last_ok_at")
         cutoff = _iso(datetime.fromisoformat(last_ok.replace("Z", "+00:00")) - FIRST_SIGHT_GRACE) if last_ok else None
-    ctx = ev.Ctx(me=me, seeding=seeding, cutoff=cutoff, paths_changed=_paths_changed(tok))
+    ctx = ev.Ctx(me=me, seeding=seeding, cutoff=cutoff, paths_changed=_paths_changed(tok),
+                 real_work=_real_work(tok, cfg["org"], me))
 
     events, prs = [], dict(prev)
     for pid, pr in detail.items():
@@ -449,6 +484,8 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
                 followup.enqueue(e)
             elif e["type"] == "mention":
                 followup.enqueue_mention(e)
+            elif e["type"] == "change_request":
+                followup.enqueue_change_request(e)
     jobs = [j for j in followup.all_jobs() if j["id"] not in gone_jobs]
     rechecked = followup.recheck_reapprovals(
         [pr for pr in detail.values() if pr["kind"] == "others"], jobs, cfg, dry_run)

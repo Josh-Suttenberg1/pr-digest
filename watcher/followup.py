@@ -1,12 +1,21 @@
-"""Follow-ups: when someone responds to your review comment, check the new commits;
-when someone @mentions you, draft your answer; when a reviewer comments on your own PR,
-draft your reply.
+"""Follow-ups: when someone responds to your review comment or to your change request,
+check the new commits; when someone @mentions you, draft your answer; when a reviewer
+comments on your own PR, draft your reply.
 
 A job is one JSON file in state/watcher/jobs/<job_id>.json. A response's id is derived
 from (thread id, your comment id), a mention's from the mentioning item, so the same
 response or mention never queues twice. A mention job has `trigger` "mention" and
 `where` (issue comment, review body, or inline comment); its reply posts as a reply in
 the inline thread, or as a top-level comment otherwise.
+
+A change-request job (`trigger` "change_request") is the author's response to your
+standing change request outside any thread (watcher/events.py `_diff_change_request`):
+real commits since it, a top-level comment, or a review body. Its id comes from your
+change request and the responses it carries, so a later response queues a fresh job,
+and that newer job replaces the older one (`cleared_jobs`): one verdict at a time,
+always over everything since your last touch. Your change request's body is "your
+comment"; Claude judges the commits and the author's words against it, like a
+thread's follow-up. It never re-approves (your latest decision isn't an approval).
 
 An answer job (`trigger` "answer") is a comment waiting on you on your own PR: an open
 thread whose last word isn't yours, a top-level comment, or a change request's body
@@ -22,6 +31,8 @@ longer waiting on you (`stale_answers`).
   ready   -> posted (you clicked "Post this reply") | dismissed
   queued, ready or failed -> cleared, when you answer the thread yourself: you reply
           in it, resolve it, or submit a new review (`cleared_jobs`, run each tick);
+          for a change-request job, when you submit a new review, leave a top-level
+          comment, your change request is dismissed, or a newer response replaces it;
           or when the PR merges or closes (`cancel_for_pr`, `orphaned_prs`)
 
 A finished run doesn't pop up a notification: the watcher already sent the PR's one
@@ -55,6 +66,50 @@ from watcher.state import JOBS_DIR  # noqa: E402
 FOOTER = "Drafted with Claude 🤖"
 DIFF_LIMIT = 60_000
 VERDICTS = ("addressed", "partly", "not_addressed")
+
+CR_PROMPT = """@{me} requested changes on a coworker's pull request. Since then, {trigger_text}.
+Decide whether the author has addressed the change request, and draft @{me}'s reply.
+
+PR: avetta/{repo}#{number} — {title}
+PR author: @{author}
+@{me}'s change request ({comment_url}):
+---
+{my_comment}
+---
+{inline}
+The author's words since the change request, in order:
+{responses}
+
+Commits since @{me}'s last review or comment ({arm_short}..{head_short}){rebased_note}:
+{commits}
+
+Files changed over that range:
+{stat}
+
+Diff over that range (may be cut off):
+```diff
+{diff}
+```
+
+The clone is at {clone}. You may read more with `git -C {clone} show|log|diff` at
+these commits. Judge only against what @{me}'s change request asked for. Don't review
+anything else. When the author answered in words instead of code, judge whether their
+answer settles what was asked.
+
+Reply rules: address the PR author by handle, plain English, at most 3 sentences. Cite the
+commit (short sha) that fixed it. If it's not addressed, say concretely what is still missing.
+No bare acceptance-criteria labels. Don't add a signature.
+
+"mechanical" is true only when the commits do exactly what @{me}'s change request asked,
+as it was asked: no pushback, no different approach, nothing asked left open.
+
+Output ONLY a JSON object, no prose, no code fences:
+{{"verdict": "addressed" | "partly" | "not_addressed",
+  "mechanical": true | false,
+  "evidence": [{{"file": "...", "line": 0, "sha": "<full or short sha of the fixing commit>", "note": "..."}}],
+  "reply": "..."}}
+"""
+
 
 PROMPT = """@{me} left a review comment on a coworker's pull request. Since then, {trigger_text}.
 Decide whether the commits since that comment address it, and draft @{me}'s reply.
@@ -166,6 +221,12 @@ def mention_job_id(where: str, comment_id: int) -> str:
     return hashlib.sha1(f"mention:{where}:{comment_id}".encode()).hexdigest()[:12]
 
 
+def cr_job_id(review_id, response_key: str) -> str:
+    """A change-request job's id, from your change request and the responses it
+    carries."""
+    return hashlib.sha1(f"cr:{review_id}:{response_key}".encode()).hexdigest()[:12]
+
+
 def answer_job_id(ask: dict) -> str:
     """An answer job's id, from the comment that put it on you (`ask["key"]`)."""
     return hashlib.sha1(f"answer:{ask['key']}".encode()).hexdigest()[:12]
@@ -244,6 +305,8 @@ def event_job_id(event: dict) -> str:
     """The id of the job an event queues."""
     if event["type"] == "mention":
         return mention_job_id(event["where"], event["comment_id"])
+    if event["type"] == "change_request":
+        return cr_job_id(event["review_id"], event["response_key"])
     return job_id(event["thread_id"], event["arm_id"])
 
 
@@ -304,7 +367,45 @@ def enqueue_mention(event: dict) -> str | None:
     return jid
 
 
+def enqueue_change_request(event: dict) -> str | None:
+    """Queue a follow-up for the author's response to your change request; None when
+    this response already has one."""
+    jid = event_job_id(event)
+    if job_path(jid).exists():
+        return None
+    save_job({
+        "id": jid, "status": "queued", "trigger": "change_request",
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        **{k: event.get(k) for k in ("actor", "triggers", "review_id", "response_key",
+                                     "arm_commit", "head", "since", "my_comment",
+                                     "my_comment_url", "my_inline", "responses", "url")},
+        "thread_id": None, "root_id": None, "blocking": True, "pr": event["pr"],
+    })
+    return jid
+
+
 CLEARABLE = ("queued", "ready", "failed")
+
+
+def _cr_cleared(job: dict, pr: dict, jobs: list[dict], me: str, reviewed: bool) -> str:
+    """Why a change-request job no longer stands, '' while it does."""
+    since = job.get("created_at") or ""
+    if reviewed:
+        return "you submitted a new review"
+    decisions = [r for r in sorted(pr["reviews"], key=lambda r: r.get("submitted_at") or "")
+                 if r["author"] == me and r["state"] in ("APPROVED", "CHANGES_REQUESTED",
+                                                         "DISMISSED")]
+    if not decisions or decisions[-1]["state"] != "CHANGES_REQUESTED":
+        return "your change request was dismissed"
+    if any(c["author"] == me and (c.get("created_at") or "") > since
+           for c in pr["issue_comments"]):
+        return "you commented on the PR"
+    if any(j is not job and j.get("trigger") == "change_request"
+           and (j.get("pr") or {}).get("id") == pr["id"]
+           and j.get("review_id") == job.get("review_id")
+           and (j.get("created_at") or "") > since for j in jobs):
+        return "a newer response replaced it"
+    return ""
 
 
 def cleared_jobs(pr: dict, jobs: list[dict], me: str) -> list[tuple[str, str]]:
@@ -323,6 +424,11 @@ def cleared_jobs(pr: dict, jobs: list[dict], me: str) -> list[tuple[str, str]]:
                        and (r["state"] in ("APPROVED", "CHANGES_REQUESTED")
                             or (r["state"] == "COMMENTED" and (r.get("body") or "").strip()))
                        for r in pr["reviews"])
+        if job.get("trigger") == "change_request":
+            why = _cr_cleared(job, pr, jobs, me, reviewed)
+            if why:
+                out.append((job["id"], why))
+            continue
         t = threads.get(job.get("thread_id"))
         if job.get("trigger") == "mention":
             after = job.get("mentioned_at") or since
@@ -411,8 +517,9 @@ def _git(clone: Path, *args: str, check: bool = False) -> subprocess.CompletedPr
                           timeout=300, check=check)
 
 
-def collect_range(clone: Path, number: int, arm: str, head: str, path: str) -> dict:
-    """Commits and diffs between your comment's commit and the current head."""
+def collect_range(clone: Path, number: int, arm: str, head: str, path: str | None) -> dict:
+    """Commits and diffs between your comment's commit and the current head. With no
+    `path`, `file_diff` is the whole diff."""
     _git(clone, "fetch", "-q", "--no-write-fetch-head", "origin", f"pull/{number}/head")
     if _git(clone, "cat-file", "-e", f"{arm}^{{commit}}").returncode != 0:
         _git(clone, "fetch", "-q", "--no-write-fetch-head", "origin", arm)
@@ -421,7 +528,7 @@ def collect_range(clone: Path, number: int, arm: str, head: str, path: str) -> d
         commits = "(the branch was rebased or force-pushed since the comment; showing the tree diff)"
     else:
         commits = _git(clone, "log", "--first-parent", "--format=%h %an: %s", f"{arm}..{head}").stdout.strip()
-    file_diff = _git(clone, "diff", arm, head, "--", path).stdout
+    file_diff = _git(clone, "diff", arm, head, *(["--", path] if path else [])).stdout
     stat = _git(clone, "diff", "--stat", arm, head).stdout.strip()
     return {"rebased": rebased, "commits": commits or "(none)",
             "file_diff": file_diff[:DIFF_LIMIT] or "(no change to this file)",
@@ -445,6 +552,33 @@ def build_prompt(job: dict, rng: dict, clone: Path, me: str) -> str:
         rebased_note=" — rebased, tree diff" if rng["rebased"] else "",
         commits=rng["commits"], file_diff=rng["file_diff"], stat=rng["stat"], clone=clone,
     )
+
+
+CR_TRIGGER_WORDS = {"pushed": "pushed commits", "commented": "commented on the PR",
+                    "review": "answered in a review"}
+
+
+def build_cr_prompt(job: dict, rng: dict, clone: Path, me: str) -> str:
+    pr = job["pr"]
+    did = [CR_TRIGGER_WORDS[t] for t in job.get("triggers") or [] if t in CR_TRIGGER_WORDS]
+    trigger_text = f"@{job['actor']} " + (" and ".join(did) or "responded")
+    inline = ""
+    if job.get("my_inline"):
+        inline = "Its inline comments:\n" + "\n".join(
+            f"- {c.get('path')}" + (f":{c['line']}" if c.get("line") else "")
+            + f": {(c.get('body') or '')[:800]}" for c in job["my_inline"]) + "\n"
+    said = [r for r in job.get("responses") or [] if r.get("trigger") != "pushed"]
+    responses = "\n".join(f"- ({r.get('trigger')}, {r.get('url') or ''}) {(r.get('body') or '')[:2000]}"
+                          for r in said) or "(none; the author only pushed commits)"
+    return CR_PROMPT.format(
+        me=me, trigger_text=trigger_text, repo=pr["repo"], number=pr["number"],
+        title=pr["title"], author=pr["author"], comment_url=job.get("my_comment_url") or "",
+        my_comment=job.get("my_comment") or "(no body; see the inline comments)",
+        inline=inline, responses=responses, arm_short=(job.get("arm_commit") or "")[:8],
+        head_short=(job.get("head") or "")[:8],
+        rebased_note=" — rebased, tree diff" if rng["rebased"] else "",
+        commits=rng["commits"], stat=rng["stat"],
+        diff=rng["file_diff"].replace("(no change to this file)", "(no changes)"), clone=clone)
 
 
 def parse_result(text: str) -> dict:
@@ -715,12 +849,15 @@ def with_footer(reply: str) -> str:
 
 def report_markdown(job: dict, result: dict) -> str:
     pr = job["pr"]
+    cr = job.get("trigger") == "change_request"
+    trigger = (" and ".join(CR_TRIGGER_WORDS.get(t, t) for t in job.get("triggers") or [])
+               if cr else job["trigger"])
     lines = [
         f"# Follow-up: {render.subtitle(pr)}",
         "",
         f"🔗 {pr['url']}",
-        f"Your comment: {job.get('my_comment_url') or ''}",
-        f"Trigger: {job['trigger']} by @{job['actor']} · range {job['arm_commit'][:8]}..{job['head'][:8]}",
+        f"Your {'change request' if cr else 'comment'}: {job.get('my_comment_url') or ''}",
+        f"Trigger: {trigger} by @{job['actor']} · range {job['arm_commit'][:8]}..{job['head'][:8]}",
         "",
         f"**Verdict:** {result['verdict'].replace('_', ' ')}",
         "",
@@ -741,7 +878,10 @@ def run(jid: str, cfg: dict | None = None) -> int:
     reports.mkdir(parents=True, exist_ok=True)
     mention = job.get("trigger") == "mention"
     answer = job.get("trigger") == "answer"
-    if answer:
+    cr = job.get("trigger") == "change_request"
+    if cr:
+        stem = reports / f"{pr['repo']}-{pr['number']}-cr-{jid}"
+    elif answer:
         stem = reports / f"{pr['repo']}-{pr['number']}-answer-{jid}"
     elif mention:
         stem = reports / f"{pr['repo']}-{pr['number']}-mention-{job['comment_id']}"
@@ -754,6 +894,9 @@ def run(jid: str, cfg: dict | None = None) -> int:
             prompt = build_mention_prompt(job, clone, cfg["me"])
         elif not (clone / ".git").exists():
             raise RuntimeError(f"no local clone at {clone}")
+        elif cr:
+            rng = collect_range(clone, pr["number"], job["arm_commit"], job["head"], None)
+            prompt = build_cr_prompt(job, rng, clone, cfg["me"])
         else:
             rng = collect_range(clone, pr["number"], job["arm_commit"], job["head"], job["path"])
             prompt = build_prompt(job, rng, clone, cfg["me"])
@@ -790,7 +933,7 @@ def run(jid: str, cfg: dict | None = None) -> int:
                finished_at=int(time.time()))
     if answer:
         job["note"] = result.get("note") or ""
-    if mention or answer:
+    if mention or answer or cr:
         save_job(job)
         return 0
     shas, why = reapproval_plan(job, result, cfg, clone)

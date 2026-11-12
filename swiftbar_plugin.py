@@ -1048,6 +1048,13 @@ def _response_text(job: dict, nick: dict[str, str]) -> str:
         where = {"issue": "PR comment", "review": "review"}.get(job.get("where"), where)
         state = "reply drafted" if job["status"] == "ready" else state
         return f'Mention · {where} · {actor}: "{ck.summary(job.get("body") or "", 50)}" · {state}'
+    if job.get("trigger") == "change_request":
+        said = next((r.get("body") for r in job.get("responses") or []
+                     if r.get("trigger") != "pushed" and r.get("body")), "")
+        what = (f'{actor}: "{ck.summary(said, 50)}"' if said else f"{actor} pushed commits")
+        if said and "pushed" in (job.get("triggers") or []):
+            what += " + commits"
+        return f"Change request · {what} · {state}"
     kind = "blocking" if priority.job_blocking(job) else ck.kind(job.get("my_comment") or "")
     if job.get("trigger") == "reply":
         reply = next((c["body"] for c in reversed(job.get("thread") or [])
@@ -1063,7 +1070,8 @@ def _response_detail(job: dict) -> None:
     the per-reply actions. "Post this reply" posts exactly the reply file's text (the
     click is your approval); "Edit first" opens it, and posting then uses whatever
     the file holds."""
-    emit("----Open the thread on GitHub", href=job["url"])
+    emit("----Open on GitHub" if job.get("trigger") == "change_request"
+         else "----Open the thread on GitHub", href=job["url"])
     if job.get("trigger") in ("mention", "answer"):
         emit(f"----Their comment: {truncate(sanitize(job.get('body') or ''), 80)}",
              color="#888888", tooltip=sanitize(job.get("body") or ""))
@@ -1071,7 +1079,8 @@ def _response_detail(job: dict) -> None:
         emit(f"----Claude: {truncate(sanitize(job['note']), 100)}", color="#888888",
              tooltip=sanitize(job["note"]))
     else:
-        emit(f"----Your comment: {truncate(sanitize(job.get('my_comment') or ''), 80)}",
+        mine = "Your change request" if job.get("trigger") == "change_request" else "Your comment"
+        emit(f"----{mine}: {truncate(sanitize(job.get('my_comment') or ''), 80)}",
              color="#888888", tooltip=sanitize(job.get("my_comment") or ""))
     if job["status"] == "failed":
         emit(f"----{sanitize(job.get('error') or 'unknown error')}", color="#888888")
@@ -1140,6 +1149,8 @@ def followup_block(e: dict, nick: dict[str, str]) -> None:
         emit("--Read Claude's follow-up")
         for j in ready:
             where = Path(j.get("path") or "").name + (f":{j['line']}" if j.get("line") else "")
+            if j.get("trigger") == "change_request":
+                where = "your change request"
             _read_item(f"----{where or 'thread'}", j["report"])
     if ready:
         emit("--Post the drafted replies", bash=str(WATCHER), param1="post",

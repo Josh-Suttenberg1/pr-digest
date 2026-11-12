@@ -158,6 +158,15 @@ def _followup_facts(group: dict) -> list[str]:
             continue
         where = f"{job.get('path')}:{job.get('line')}" if job.get("path") else "a thread"
         verdict = (job.get("verdict") or job["status"]).replace("_", " ")
+        if job.get("trigger") == "change_request":
+            facts.append(f"Your change request ({job.get('my_comment_url', '')}): "
+                         f"{job.get('actor')} responded at {local(job.get('created_at'))} "
+                         f"({', '.join(job.get('triggers') or [])}); verdict: {verdict}.")
+            if job.get("report"):
+                facts.append(f"  Follow-up report: {job['report']}")
+            if job.get("reply_file"):
+                facts.append(f"  Drafted reply: {job['reply_file']}")
+            continue
         facts.append(f"Your {'blocking ' if job.get('blocking') else ''}comment on {where} "
                      f"({job.get('my_comment_url', '')}): {job.get('actor')} moved at "
                      f"{local(job.get('created_at'))} ({job.get('trigger')}); verdict: {verdict}.")
