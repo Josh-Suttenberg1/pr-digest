@@ -7,7 +7,7 @@ import io
 import tempfile
 import unittest
 from contextlib import redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -17,6 +17,11 @@ from triage import priority as P
 from triage import reviews as R
 from watcher import __main__ as W
 from watcher import gh, popups
+
+
+def an_hour_ago() -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 
 NOW = datetime(2026, 11, 11, 18, 0, tzinfo=timezone.utc)
 TEAM = ["plaxdan", "mthomas46"]
@@ -101,7 +106,7 @@ class CandidatesTest(unittest.TestCase):
     def test_a_teammates_pr_ranks_like_a_direct_request(self):
         st = {**self.review_state(requested=False), "lines_changed": 500}
         with mock.patch.object(R, "_ci_failing", return_value=[]), \
-                mock.patch.object(R, "_waiting_since", return_value="2026-11-11T17:00:00Z"):
+                mock.patch.object(R, "_waiting_since", return_value=an_hour_ago()):
             R._rank(st)
         self.assertIn("your teammate's PR", st["tags"])
         # +3 for a teammate's PR, plus under half a point for the wait (real clock).
