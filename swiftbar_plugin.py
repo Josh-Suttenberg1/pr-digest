@@ -594,28 +594,31 @@ def _pr_header(e: dict, sub: str = "--") -> None:
         emit(f"{sub}{sanitize(e['why'])}", color="#888888")
 
 
-def _draft_actions(key: str, head: str, url: str) -> None:
+def _draft_actions(key: str, head: str, url: str, sub: str = "--") -> None:
     """The review draft's actions: running (cancel), failed, Read draft, Re-run review
-    or Review with Claude, and Open in Claude."""
+    or Review with Claude, and Open in Claude. `sub` is the submenu's prefix ("----"
+    for a row nested one level down)."""
     status = review_status(key, head)
     if "running" in status:
         run = status["running"]
-        emit(f"--Review running: {sanitize(run['step'])} · {fmt_dur(run['elapsed'])}",
+        emit(f"{sub}Review running: {sanitize(run['step'])} · {fmt_dur(run['elapsed'])}",
              color="#d29922")
-        emit("--Cancel this review", bash=str(REVIEW_MENU), param1="--cancel",
+        emit(f"{sub}Cancel this review", bash=str(REVIEW_MENU), param1="--cancel",
              param2=key, terminal="false", refresh="true")
         return
     draft = status.get("draft")
     if draft and draft["path"]:
-        _read_item("--Read draft", draft["path"])
+        _read_item(f"{sub}Read draft", draft["path"])
     if _reviews_on():
-        emit("--Re-run review" if draft else "--Review with Claude", bash=str(REVIEW_MENU),
-             param1="--review", param2=key, terminal="false", refresh="true")
+        emit(f"{sub}Re-run review" if draft else f"{sub}Review with Claude",
+             bash=str(REVIEW_MENU), param1="--review", param2=key, terminal="false",
+             refresh="true")
     if draft:
-        emit("--Open in Claude", bash=str(REVIEW_MENU), param1="--open-claude",
+        emit(f"{sub}Open in Claude", bash=str(REVIEW_MENU), param1="--open-claude",
              param2=key, terminal="false")
     else:
-        _claude_item("--Open in Claude", _status_prompt(f"Let's look at the PR {url}.", url))
+        _claude_item(f"{sub}Open in Claude",
+                     _status_prompt(f"Let's look at the PR {url}.", url))
 
 
 def _draft_line(key: str, head: str) -> str:
@@ -1193,15 +1196,20 @@ def followup_block(e: dict, nick: dict[str, str]) -> None:
 
 def other_block(e: dict, nick: dict[str, str], depth: int = 0) -> None:
     """A row with nothing for you to do; the submenu says why. `depth` 1 nests it in
-    the Nothing needed submenu."""
+    the Nothing needed submenu. A PR from the review triage (a parked review, one
+    already well approved, …) keeps the review draft's actions, so a review can still
+    be started from it."""
     url = e["url"]
     top, sub = "--" * depth, "--" * (depth + 1)
+    st = e.get("st") or {}
     emit(top + row_text(e), href=url)
     _pr_header(e, sub)
-    author = (e.get("st") or {}).get("author")
+    author = st.get("author")
     if author:
         emit(f"{sub}by {_who(author, nick)}", color="#888888")
     emit(sub + "---")
+    if st.get("pr_url") and st.get("head_sha"):
+        _draft_actions(_key(url), st["head_sha"], url, sub)
     emit(f"{sub}Open on GitHub", href=url)
 
 

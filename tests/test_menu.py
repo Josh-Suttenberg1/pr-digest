@@ -155,6 +155,24 @@ class BuildSectionsTest(unittest.TestCase):
         self.assertTrue(any(x.startswith("----") and "Open on GitHub" in x
                             for x in out.getvalue().splitlines()))
 
+    def test_a_parked_review_in_nothing_needed_can_still_start_a_review(self):
+        import contextlib
+        import io
+        parked = st(5, tier=menu.PARKED_TIER, tags=["CI failing: build"], bucket="needs_you",
+                    head_sha="abc1234")
+        s = menu.build_sections(self.data(reviews={"needs_you": [parked]}), [])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), \
+                unittest.mock.patch.object(menu, "_reviews_on", return_value=True), \
+                unittest.mock.patch.object(menu, "review_status", return_value={}):
+            menu.others_rows(s, {})
+        lines = out.getvalue().splitlines()
+        review = [x for x in lines if "Review with Claude" in x]
+        self.assertEqual(len(review), 1)
+        self.assertTrue(review[0].startswith("----Review with Claude"))   # inside the row
+        self.assertIn("param2=api#5", review[0])
+        self.assertTrue(any(x.startswith("----Open in Claude") for x in lines))
+
     def test_my_waiting_pr_is_not_repeated_in_everything_else(self):
         data = self.data(mine=[mine_row(9, True)], legacy=[legacy(9, author=ME, repo="web")])
         s = menu.build_sections(data, [])
