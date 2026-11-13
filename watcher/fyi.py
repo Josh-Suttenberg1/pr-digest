@@ -83,8 +83,8 @@ def item_id(kind: str, pr: dict, who: str = "") -> str:
 def add(items: list[dict], cfg: dict, path: Path | None = None, run=subprocess.run,
         send: bool = True) -> list[dict]:
     """Store each new item ({id, kind, pr: {url, repo, number, title}, headline, row,
-    detail}) and send its banner. An id already stored is skipped. Returns the items
-    added."""
+    detail}, and optionally href, where the banner and the row link instead of the PR)
+    and send its banner. An id already stored is skipped. Returns the items added."""
     path = path or PATH
     added = []
     with _locked(path):
@@ -100,7 +100,7 @@ def add(items: list[dict], cfg: dict, path: Path | None = None, run=subprocess.r
         for it in added:
             popups.send(popups.FYI, it["pr"], "low", f"⚪ {it['headline']}",
                         it.get("subtitle") or "", it.get("detail") or " ", cfg,
-                        href=it["pr"].get("url"), job=it["id"], run=run)
+                        href=it.get("href") or it["pr"].get("url"), job=it["id"], run=run)
     return added
 
 

@@ -71,6 +71,12 @@ a popup out and withdraws the popups whose item is done (`settle_popups`): the P
 no color left, the review you owed was given, the escalated auto-fix was answered, or
 the PR merged or closed. The menu refetches when one is withdrawn.
 
+Each tick moves the Jira ticket of every PR of yours that merged into main since the
+last tick, however it was merged to the status that follows a merge
+(watcher/jira_merge.py, `jira_merge_pass`): a quiet ⚪ FYI when it moves or waits on
+another open PR, a red alert when the ticket is in a status the merge doesn't expect.
+`watcher jira-merge --dry-run --since 30d` replays a window and changes nothing.
+
 Each tick also finds FYIs (watcher/fyi.py): approvals of your PRs that ask nothing
 (`approval_fyis`), a PR of yours becoming Ready, and reviews you owed that stopped being
 owed without you (`owed_fyis`). Each is a ⚪ menu row and one quiet banner.
@@ -105,7 +111,7 @@ from watcher import events as ev  # noqa: E402
 from triage import mine as mine_triage  # noqa: E402
 from triage import comment_kind  # noqa: E402
 from triage import priority  # noqa: E402
-from watcher import approval, autofix, followup, fyi, gh, popups, render, state  # noqa: E402
+from watcher import approval, autofix, followup, fyi, gh, jira_merge, popups, render, state  # noqa: E402
 
 LABEL = "com.josh.pr-digest-watcher"
 PLIST = Path(f"~/Library/LaunchAgents/{LABEL}.plist").expanduser()
@@ -562,6 +568,7 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
         print(f"-- {len(events)} event(s) on {len({e['pr']['id'] for e in events})} PR(s); "
               f"{len(ready)} notification(s) now, {len(pending)} waiting for drafts; "
               f"{len(todo)} PR(s) fetched in detail; cutoff {cutoff}")
+        jira_merge_pass(cfg, tok, dry_run=True)
         drafts_pass(cfg, dry_run=True)
         return 0
 
@@ -588,9 +595,23 @@ def tick(cfg: dict, dry_run: bool = False, since: str | None = None) -> int:
     for it in fyi.add(fyis, cfg):
         print(f"{_iso(datetime.now(timezone.utc))} sent fyi: {it['headline']} → "
               f"{it['pr'].get('url')}", flush=True)
+    if jira_merge_pass(cfg, tok):
+        _refetch_menu()
     drafts_pass(cfg)
     _refresh_menu(cfg)
     return 0
+
+
+def jira_merge_pass(cfg: dict, tok: str, dry_run: bool = False, since: str | None = None) -> list[dict]:
+    """Move the Jira ticket of each PR of yours that merged since the last tick
+    (watcher/jira_merge.py). Never breaks the tick."""
+    stamp = _iso(datetime.now(timezone.utc))
+    try:
+        return jira_merge.run(cfg, tok, dry_run=dry_run, since=since,
+                              log=lambda m: print(f"{stamp} {m}", flush=True))
+    except Exception as exc:  # noqa: BLE001 — a Jira or GitHub hiccup waits for the next tick
+        print(f"{stamp} jira-merge failed: {exc}", flush=True)
+        return []
 
 
 def settle_popups(entries: dict[str, dict], checked: set[str], still_colored: set[str],
@@ -973,6 +994,9 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("job", help="a job id, or (with --dry-run) a review comment link")
     a.add_argument("--dry-run", action="store_true",
                    help="assess, edit, scope-check and validate, then stop and print")
+    jm = sub.add_parser("jira-merge", help="move the Jira tickets of PRs merged since the last look")
+    jm.add_argument("--dry-run", action="store_true", help="say what it would do; change nothing")
+    jm.add_argument("--since", help="with --dry-run: replay merges in this window, e.g. 30d")
     args = parser.parse_args(argv)
 
     cfg = settings.load()
@@ -1036,6 +1060,15 @@ def main(argv: list[str] | None = None) -> int:
             drafts_pass(cfg, only=job["pr"]["url"])
         _refresh_menu(cfg)
         return rc
+    if args.cmd == "jira-merge":
+        if args.since and not args.dry_run:
+            parser.error("--since only works with --dry-run")
+        since = _iso(datetime.now(timezone.utc) - _parse_since(args.since)) if args.since else None
+        if not args.dry_run and state.lock() is None:
+            print("a tick is running; it does this pass itself", file=sys.stderr)
+            return 0
+        jira_merge_pass(cfg, gh.token(), dry_run=args.dry_run, since=since)
+        return 0
     if args.cmd == "autofix-run":
         rc = autofix.run_command(args.job, cfg, args.dry_run)
         if not args.dry_run:

@@ -917,7 +917,8 @@ def done_rows(entries: list[dict], nick: dict[str, str]) -> None:
 
 def fyi_rows(items: list[dict]) -> None:
     """FYI: ⚪ things to know that ask nothing of you (watcher/fyi.py), oldest first.
-    Each row opens its PR; it's gone the next time the menu opens."""
+    Each row opens its `href` (a Jira ticket the watcher moved), else its PR; it's gone
+    the next time the menu opens."""
     emit("FYI", color="#888888")
     for it in items:
         pr = it.get("pr") or {}
@@ -925,7 +926,7 @@ def fyi_rows(items: list[dict]) -> None:
             continue
         emit(row_text({"color": priority.LOW, "title": pr.get("title") or "", "url": pr["url"],
                        "reason": f"{it.get('row') or it.get('headline') or ''} · {when(it.get('at'))}"}),
-             href=pr["url"], tooltip=sanitize(it.get("headline") or ""))
+             href=it.get("href") or pr["url"], tooltip=sanitize(it.get("headline") or ""))
 
 
 def fyi_items() -> list[dict]:
