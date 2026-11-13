@@ -48,13 +48,13 @@ class OverlayTest(unittest.TestCase):
         self.assertEqual(p["reason"], "Claude is fixing Woods's nit · 0 of 2 approvals")
         p = self.mine(row(ask("T1"), ask("T2", "suggestion")), [fix("T1", "queued")])
         self.assertEqual(p["color"], P.YELLOW)
-        self.assertIn("Reply to Woods: 1 suggestion · Claude is fixing Woods's nit", p["reason"])
+        self.assertIn("Woods left 1 suggestion · Claude is fixing Woods's nit", p["reason"])
 
     def test_an_escalation_turns_the_row_red_with_its_reason(self):
         p = self.mine(row(ask("T1")), [fix("T1", "escalated", reason="validation failed",
                                             escalated_at="2026-11-06T19:00:00Z")])
         self.assertEqual(p["color"], P.RED)
-        self.assertTrue(p["reason"].startswith("Couldn't auto-fix: validation failed · Reply to Woods: 1 nit"))
+        self.assertTrue(p["reason"].startswith("Claude couldn't auto-fix Woods's nit: validation failed · Woods left 1 nit"))
         self.assertIn("Claude couldn't auto-fix Woods's nit: validation failed", p["why"])
         self.assertEqual(p["activity_at"], "2026-11-06T19:00:00Z")
 
@@ -108,7 +108,7 @@ class MenuRenderTest(unittest.TestCase):
         s = menu.build_sections(data, [], nick=NICK, now=NOW, autofix_jobs=jobs)
         self.assertEqual(s["title"], "🔴1")
         lines = self.render(menu.mine_rows, s["mine_view"], NICK, 2)
-        self.assertTrue(lines[1].startswith("🔴 ABC-123 · Couldn't auto-fix: Claude disagrees"))
+        self.assertTrue(lines[1].startswith("🔴 ABC-123 · Claude couldn't auto-fix Woods's nit: Claude disagrees"))
         self.assertTrue(any("couldn’t auto-fix: Claude disagrees" in x for x in lines
                             if x.startswith("--Nit")))
         self.assertIn("--Auto-fix (1) | color=#888888", lines)

@@ -51,8 +51,8 @@ class FollowupRulesTest(unittest.TestCase):
                reason="you commented; you were re-requested")
         e = classify({"needs_you": [s]}, [job(1, "a", blocking=False)])[url(1)]
         self.assertEqual((e["section"], e["color"]), (P.FOLLOWUP, P.RED))
-        self.assertEqual(e["reason"], "Mykal re-requested your review and answered your comment · "
-                                     "0 of 2 approvals")
+        self.assertEqual(e["reason"], "Mykal re-requested you and answered your comment · "
+                                     "0 of 2 approvals · today")
 
     def test_a_rerequest_is_red_whatever_your_earlier_decision(self):
         s = st(1, mine=("APPROVED", "abc"), bucket="well_approved",
@@ -68,22 +68,38 @@ class FollowupRulesTest(unittest.TestCase):
         e = entries[url(1)]
         self.assertEqual((e["section"], e["color"], len(e["jobs"])), (P.FOLLOWUP, P.RED, 2))
         self.assertEqual(e["reason"], "Mykal answered 2 of your comments, 1 blocking · "
-                                      "0 of 2 approvals")
+                                      "0 of 2 approvals · today")
         self.assertEqual(e["why"], "Why it's red: Mykal replied to your blocking comment")
 
     def test_non_blocking_responses_are_yellow_even_after_you_approved(self):
         s = st(1, mine=("APPROVED", "abc"), bucket="done", reason="you approved")
         e = classify({"done": [s]}, [job(1, "a", trigger="outdated", body="**Nit:** x")])[url(1)]
         self.assertEqual((e["section"], e["color"]), (P.FOLLOWUP, P.YELLOW))
-        self.assertEqual(e["reason"], "Mykal changed the code under your comment · 0 of 2 approvals")
+        self.assertEqual(e["reason"], "Mykal changed the code under your comment · 0 of 2 approvals · "
+                                      "today")
 
     def test_commits_touching_none_of_your_threads_go_to_everything_else(self):
         s = st(1, commented=True, reason="you commented @abc12345, real commits landed since",
                tier=0)
         e = classify({"needs_you": [s]})[url(1)]
         self.assertEqual((e["section"], e["group"], e["color"]), (P.OTHER, P.WAITING, None))
-        self.assertEqual(e["reason"], "The author pushed commits that touch none of your "
+        self.assertEqual(e["reason"], "Mykal pushed commits that touch none of your "
                                       "comments · 0 of 2 approvals")
+
+    def test_a_pr_you_only_commented_on_is_aged_from_your_comment(self):
+        s = st(1, commented=True, bucket="author", reason="no new commits",
+               my_review=("", ""), touched_at="2026-11-01T12:00:00Z")
+        e = classify({"author": [s]})[url(1)]
+        self.assertEqual((e["group"], e["reason"]),
+                         (P.WAITING, "Waiting on Mykal to answer you · 0 of 2 approvals · 3d"))
+
+    def test_someone_elses_change_request_names_them_and_ages_from_it(self):
+        s = st(1, bucket="author", reason="@plaxdan requested changes on the current code",
+               my_review=("", ""), touched_at="", standing=["plaxdan"],
+               change_requested_at={"plaxdan": "2026-11-02T12:00:00Z"})
+        e = classify({"author": [s]})[url(1)]
+        self.assertEqual((e["group"], e["reason"]),
+                         (P.WAITING, "Waiting on Mykal to answer Woods · 0 of 2 approvals · 2d"))
 
     def test_answered_or_dismissed_jobs_no_longer_count(self):
         s = st(1, commented=True, bucket="author", reason="no new commits")
@@ -110,13 +126,30 @@ class OwedRulesTest(unittest.TestCase):
     def test_new_request_is_green(self):
         e = classify({"needs_you": [st(1, waiting_since="2026-11-03T20:00:00Z")]})[url(1)]
         self.assertEqual((e["section"], e["color"]), (P.OWED, P.GREEN))
-        self.assertEqual(e["reason"], "Review it · 0 of 2 approvals · 1d")
+        self.assertEqual(e["reason"], "Mykal opened it · 0 of 2 approvals · 1d")
+
+    def test_the_age_counts_from_when_it_was_opened_and_the_color_from_when_you_were_asked(self):
+        s = st(1, opened_at="2026-10-30T12:00:00Z", waiting_since="2026-11-03T20:00:00Z")
+        e = classify({"needs_you": [s]})[url(1)]
+        self.assertEqual((e["color"], e["reason"]),
+                         (P.GREEN, "Mykal opened it · 0 of 2 approvals · 5d"))
+        self.assertIn("requested yesterday", e["why"])
+
+    def test_opened_at_is_the_last_ready_for_review_after_a_draft(self):
+        from triage import reviews as R
+        s = {"created_at": "2026-10-20T12:00:00Z", "timeline": [
+            {"event": "ready_for_review", "created_at": "2026-10-25T12:00:00Z"},
+            {"event": "convert_to_draft", "created_at": "2026-10-26T12:00:00Z"},
+            {"event": "ready_for_review", "created_at": "2026-10-30T12:00:00Z"}]}
+        self.assertEqual(R._opened_at(s), "2026-10-30T12:00:00Z")
+        self.assertEqual(R._opened_at({"created_at": "2026-10-20T12:00:00Z", "timeline": []}),
+                         "2026-10-20T12:00:00Z")
 
     def test_stalled_review_is_yellow(self):
         s = st(1, waiting_since="2026-11-01T12:00:00Z", engaged=["kylerscharpen"])
         e = classify({"needs_you": [s]})[url(1)]
         self.assertEqual(e["color"], P.YELLOW)
-        self.assertEqual(e["reason"], "Review it · 0 of 2 approvals · 3d")
+        self.assertEqual(e["reason"], "Mykal opened it · 0 of 2 approvals · 3d")
         self.assertEqual(e["why"], "Why it's yellow: requested 3 days ago · no approvals · "
                                    "only Kyler has reviewed or commented")
 
@@ -124,8 +157,8 @@ class OwedRulesTest(unittest.TestCase):
         s = st(1, waiting_since="2026-11-01T12:00:00Z", engaged=["kylerscharpen", "plaxdan"])
         e = classify({"needs_you": [s]})[url(1)]
         self.assertEqual(e["color"], P.GREEN)
-        self.assertEqual(e["reason"], "Review it · 0 of 2 approvals · 3d · Kyler and Woods "
-                                      "are on it")
+        self.assertEqual(e["reason"], "Mykal opened it · Kyler and Woods are on it · "
+                                      "0 of 2 approvals · 3d")
 
     def test_two_days_exactly_is_not_yet_stale_and_enough_approvals_never_is(self):
         self.assertEqual(classify({"needs_you": [st(1, waiting_since="2026-11-02T18:00:00Z")]})
@@ -137,7 +170,7 @@ class OwedRulesTest(unittest.TestCase):
         s = st(1, mine=("DISMISSED", "abc"), reason="your earlier review was dismissed", tier=0)
         e = classify({"needs_you": [s]})[url(1)]
         self.assertEqual(e["section"], P.OWED)
-        self.assertTrue(e["reason"].startswith("Your review was dismissed"))
+        self.assertTrue(e["reason"].startswith("Your review on Mykal's PR was dismissed"))
 
     def test_a_rereview_never_lands_in_reviews_you_owe(self):
         s = st(1, mine=("CHANGES_REQUESTED", "abc"), tier=0,
@@ -149,7 +182,7 @@ class OwedRulesTest(unittest.TestCase):
         e = P.classify([], {"needs_you": [s], "author": [], "well_approved": [], "done": [],
                             "unreadable": []}, [], nick=NICK, now=NOW, pod={"m0n01d"})[0]
         self.assertEqual((e["section"], e["color"]), (P.OWED, P.RED))
-        self.assertEqual(e["reason"], "Review it · 0 of 2 approvals · today")
+        self.assertEqual(e["reason"], "m0n01d opened it · 0 of 2 approvals · today")
         self.assertTrue(e["why"].startswith("Why it's red: m0n01d is in your pod, so you "
                                             "review it first"))
 
@@ -176,7 +209,7 @@ class OwedRulesTest(unittest.TestCase):
     def test_parked_first_review_is_everything_else(self):
         s = st(1, tier=P.PARKED_TIER, tags=["CI failing: build"])
         e = classify({"needs_you": [s]})[url(1)]
-        self.assertEqual((e["section"], e["reason"]), (P.OTHER, "Parked: CI failing (build)"))
+        self.assertEqual((e["section"], e["reason"]), (P.OTHER, "Parked · CI failing (build)"))
 
 
 def mine_row(n, waiting=False, **kw):
@@ -202,7 +235,7 @@ class MineNeedsYouTest(unittest.TestCase):
     def test_only_nits_and_suggestions_are_yellow(self):
         p = mine_p(mine_row(1, True, threads_waiting=[ask("nit"), ask("suggestion")]))
         self.assertEqual((p["group"], p["color"]), (P.NEEDS, P.YELLOW))
-        self.assertEqual(p["reason"], "Reply to Woods: 1 suggestion, 1 nit · 0 of 2 approvals · 2d")
+        self.assertEqual(p["reason"], "Woods left 1 suggestion, 1 nit · 0 of 2 approvals · 2d")
         self.assertIn("only nits and suggestions", p["why"])
 
     def test_a_question_a_blocking_or_an_unlabeled_comment_is_red(self):
@@ -215,25 +248,25 @@ class MineNeedsYouTest(unittest.TestCase):
                        threads_waiting=[ask("question", "mthomas46", "2026-11-04T10:00:00Z")])
         p = mine_p(row)
         self.assertEqual((p["group"], p["color"]), (P.NEEDS, P.RED))
-        self.assertEqual(p["reason"], "Answer Mykal's change request: 1 question · 0 of 2 approvals · today")
+        self.assertEqual(p["reason"], "Mykal requested changes: 1 question · 0 of 2 approvals · today")
 
     def test_comments_from_others_than_the_change_requester_get_their_own_part(self):
         row = mine_row(1, True, blockers=[{"author": "mthomas46", "at": "2026-11-04T10:00:00Z"}],
                        threads_waiting=[ask("nit")])
         self.assertEqual(mine_p(row)["reason"],
-                         "Answer Mykal's change request · Reply to Woods: 1 nit · 0 of 2 approvals · 2d")
+                         "Mykal requested changes · Woods left 1 nit · 0 of 2 approvals · 2d")
 
 
 class MineNotOnYouTest(unittest.TestCase):
     def test_ready_is_the_required_approvals_with_no_change_request(self):
         p = mine_p(mine_row(1, approvals=[appr("plaxdan"), appr("kylerscharpen")]))
         self.assertEqual((p["group"], p["color"], p["reason"]),
-                         (P.READY, None, "Ready: 2 of 2 approvals"))
+                         (P.READY, None, "Ready · 2 of 2 approvals"))
 
     def test_old_approvals_still_count_where_the_repo_does_not_require_a_fresh_one(self):
         row = mine_row(1, approvals=[appr("plaxdan", on_head=False),
                                      appr("kylerscharpen", on_head=False)])
-        self.assertEqual(mine_p(row)["reason"], "Ready: 2 of 2 approvals")
+        self.assertEqual(mine_p(row)["reason"], "Ready · 2 of 2 approvals")
 
     def test_a_repo_needing_a_latest_push_approval_says_so_without_a_dot(self):
         row = mine_row(1, last_push_required=True,
@@ -249,7 +282,7 @@ class MineNotOnYouTest(unittest.TestCase):
     def test_one_approval_on_the_latest_push_is_enough_for_that_rule(self):
         row = mine_row(1, last_push_required=True,
                        approvals=[appr("plaxdan", on_head=False), appr("kylerscharpen")])
-        self.assertEqual(mine_p(row)["reason"], "Ready: 2 of 2 approvals")
+        self.assertEqual(mine_p(row)["reason"], "Ready · 2 of 2 approvals")
 
     def test_waiting_on_review_names_who_and_since_when(self):
         row = mine_row(1, approvals=[appr("plaxdan")], requested=["mthomas46", "kylerscharpen"],
@@ -257,14 +290,14 @@ class MineNotOnYouTest(unittest.TestCase):
                                         "kylerscharpen": "2026-11-04T16:00:00Z"})
         p = mine_p(row)
         self.assertEqual((p["group"], p["color"]), (P.WAITING, None))
-        self.assertEqual(p["reason"], "Waiting on review: Mykal and Kyler · 1 of 2 approvals · today")
+        self.assertEqual(p["reason"], "Waiting on Mykal and Kyler to review · 1 of 2 approvals · today")
 
     def test_a_wait_past_two_days_turns_yellow_as_a_nudge(self):
         row = mine_row(1, requested=["mthomas46"],
                        requested_since={"mthomas46": "2026-11-01T12:00:00Z"})
         p = mine_p(row)
         self.assertEqual((p["group"], p["color"]), (P.WAITING, P.YELLOW))
-        self.assertEqual(p["reason"], "Waiting on review: Mykal · 0 of 2 approvals · 3d")
+        self.assertEqual(p["reason"], "Waiting on Mykal to review · 0 of 2 approvals · 3d")
         self.assertEqual(p["why"], "Why it's yellow: waiting 3 days, time to nudge Mykal")
 
     def test_two_days_exactly_is_not_yet_stale(self):
@@ -277,7 +310,7 @@ class MineNotOnYouTest(unittest.TestCase):
               "rerequested_at": "2026-11-03T20:00:00Z"}
         p = mine_p(mine_row(1, answered_change_requests=[cr], approvals=[appr("plaxdan")]))
         self.assertEqual((p["group"], p["color"]), (P.WAITING, None))
-        self.assertEqual(p["reason"], "Waiting on re-review: Mykal · 1 of 2 approvals · 1d")
+        self.assertEqual(p["reason"], "Waiting on Mykal to re-review · 1 of 2 approvals · 1d")
         self.assertEqual(p["why"], "Why: Mykal requested changes 5 days ago and you "
                                    "re-requested them yesterday")
 
@@ -285,7 +318,7 @@ class MineNotOnYouTest(unittest.TestCase):
         row = mine_row(1, approvals=[appr("plaxdan"), appr("kylerscharpen")],
                        requested=["plaxdan"], requested_since={"plaxdan": "2026-11-04T17:00:00Z"})
         p = mine_p(row)
-        self.assertEqual(p["reason"], "Waiting on re-review: Woods · 2 of 2 approvals · today")
+        self.assertEqual(p["reason"], "Waiting on Woods to re-review · 2 of 2 approvals · today")
         self.assertEqual(p["why"], "Why: you re-requested Woods after their approval")
 
     def test_no_reviewer_requested_and_drafts_have_no_age(self):
@@ -527,7 +560,7 @@ class MentionTest(unittest.TestCase):
         j = {**job(1, "m1", body=""), "trigger": "mention", "actor": "kylerscharpen"}
         e = classify({"needs_you": [st(1)]}, [j])[url(1)]
         self.assertEqual((e["section"], e["color"], e["reason"]),
-                         (P.FOLLOWUP, P.RED, "Kyler mentioned you · 0 of 2 approvals"))
+                         (P.FOLLOWUP, P.RED, "Kyler mentioned you · 0 of 2 approvals · today"))
 
     def test_answering_a_top_level_mention_clears_it(self):
         j = {**job(1, "m1"), "trigger": "mention", "where": "issue", "comment_id": 50,

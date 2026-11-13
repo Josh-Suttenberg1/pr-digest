@@ -39,10 +39,12 @@ class BookTest(unittest.TestCase):
 
     def test_fetching_book_looks_up_once_and_caches(self):
         b = self.book(fetch=True)
-        self.assertEqual(b.get("alovelace", "alovelace"), "Ada Lovelace")
-        self.assertEqual(b.get("alovelace", "alovelace"), "Ada Lovelace")
+        self.assertEqual(b.get("alovelace", "alovelace"), "Ada")
+        self.assertEqual(b.get("alovelace", "alovelace"), "Ada")
         self.assertEqual(self.calls, ["alovelace"])
-        self.assertEqual(self.book(fetch=False).get("alovelace"), "Ada Lovelace")
+        self.assertEqual(self.book(fetch=False).get("alovelace"), "Ada")
+        # The cache keeps the whole profile name; only what's shown is the first word.
+        self.assertIn("Ada Lovelace", self.path.read_text())
 
     def test_cache_only_book_never_looks_up(self):
         b = self.book(fetch=False)

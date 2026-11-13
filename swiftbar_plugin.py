@@ -425,7 +425,7 @@ def build_sections(data: dict, followup_jobs: list[dict],
         url = pr.get("url", "").rstrip("/")
         if url and url not in placed:
             placed.add(url)
-            other.append(priority.other_entry(pr, data.get("me") or ""))
+            other.append(priority.other_entry(pr, data.get("me") or "", nick))
     other.sort(key=lambda e: (e.get("order", 9), e.get("title") or ""))
     # Other PRs → Needs you: follow-ups and reviews you owe together, most severe first;
     # inside a color follow-ups lead, then reviews in ranked order.
@@ -559,6 +559,11 @@ ROW_MAX = 100
 # Indents a story's PRs under it. Blank Braille cells are printable characters, not
 # whitespace, so a leading run of them isn't trimmed away the way spaces are.
 TREE_INDENT = "\u2800\u2800"
+# Stands in for a dot and its space on a row with no dot, so every row's ticket key
+# starts at the same x. Braille blank + em space + hair space measures 22.65pt in the
+# 13pt menu font against 22.58pt for "\ud83d\udd34 " (NSString sizes); the Braille cell leads so
+# the run isn't trimmed as leading whitespace.
+NO_DOT = "\u2800\u2003\u200a"
 
 
 def subhead(name: str) -> None:
@@ -567,16 +572,18 @@ def subhead(name: str) -> None:
 
 
 def row_text(e: dict, limit: int = ROW_MAX) -> str:
-    """'🔴 ABC-123 · Woods left 8 comments (3 suggestions, 5 nits) · Show the exact…':
-    the ticket first so the row always says which PR it is, then what happened, then
-    as much of the title as fits. A PR under a story starts with its tree marker and
-    names its repo: '⠀⠀├ 🟡 ABC-2 processservice · Review it · …'."""
+    """'🔴 ABC-123 · Woods left 3 suggestions, 5 nits · 1 of 2 approvals · 2d · Show the
+    exact…': the ticket first so the row always says which PR it is, then who did what
+    (the reason, triage/priority.py), then as much of the title as fits. A row with no
+    dot keeps a dot's width of blank (`NO_DOT`) so its key lines up. A PR under a story
+    starts with its tree marker and names its repo: '⠀⠀├ 🟡 ABC-2 processservice ·
+    Dwight opened it · …'."""
     key = priority.ticket(e.get("title") or "", e["url"])
     tree = e.get("tree") or ""
     if tree:
         key += f" {e['url'].rstrip('/').split('/')[-3]}"
     d = priority.dot(e.get("color"))
-    head = f"{d} {key}" if d else key
+    head = f"{d} {key}" if d else NO_DOT + key
     if tree:
         head = TREE_INDENT + tree + head
     head += f" · {sanitize(e.get('reason') or '')}"

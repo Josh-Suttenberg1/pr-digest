@@ -101,7 +101,7 @@ class StoreTest(unittest.TestCase):
 
 class ApprovalFyiTest(unittest.TestCase):
     def fyis(self, events, approved_by, now_group=None, before=None, delivered=(), praise=None):
-        groups_now = {"PR_7": {"group": now_group, "reason": "Ready: 2 of 2 approvals"}} if now_group else {}
+        groups_now = {"PR_7": {"group": now_group, "reason": "Ready · 2 of 2 approvals"}} if now_group else {}
         return W.approval_fyis({"PR_7": mine_pr(approved_by)}, events, groups_now,
                                {"PR_7": before} if before else {}, set(delivered), NICK, CFG,
                                praise=praise or (lambda b: fyi.praise_only(b, CFG,
@@ -126,8 +126,8 @@ class ApprovalFyiTest(unittest.TestCase):
     def test_becoming_ready_replaces_the_approval(self):
         [it] = self.fyis([approval("kylerscharpen")], ["mthomas46", "kylerscharpen"], "ready", "waiting")
         self.assertEqual(it["kind"], "ready")
-        self.assertEqual(it["headline"], "CONN-1234 · Ready: 2 of 2 approvals")
-        self.assertEqual(it["row"], "Ready: 2 of 2 approvals · Kyler approved")
+        self.assertEqual(it["headline"], "CONN-1234 · Ready · 2 of 2 approvals")
+        self.assertEqual(it["row"], "Ready · 2 of 2 approvals · Kyler approved")
 
     def test_ready_without_an_earlier_classification_counts_approvals(self):
         [it] = self.fyis([approval("kylerscharpen")], ["mthomas46", "kylerscharpen"], "ready")

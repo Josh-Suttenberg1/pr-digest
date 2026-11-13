@@ -178,14 +178,14 @@ class YourPrsSectionTest(unittest.TestCase):
         [e] = menu.build_sections(self.data([row]), [], nick={"plaxdan": "Woods"},
                                   now=NOW)["mine"]
         self.assertEqual(menu.row_text(e),
-                         "🟡 ABC-9168 · Reply to Woods: 1 suggestion, 2 nits · 2 of 2 approvals · "
+                         "🟡 ABC-9168 · Woods left 1 suggestion, 2 nits · 2 of 2 approvals · "
                          "2d · thing 9168")
         self.assertEqual(e["why"], "Why it's yellow: 3 comments from Woods are unanswered; "
                                    "only nits and suggestions are waiting")
         waiting = mine_row(1, answered=[cr], approvals=1)
         [w] = menu.build_sections(self.data([waiting]), [], nick={"mthomas46": "Mykal"},
                                   now=NOW)["mine"]
-        self.assertEqual(menu.row_text(w), "🟡 ABC-1 · Waiting on re-review: Mykal · "
+        self.assertEqual(menu.row_text(w), "🟡 ABC-1 · Waiting on Mykal to re-review · "
                                            "1 of 2 approvals · 7d · thing 1")
 
     def test_sub_headers_appear_once_each_above_their_rows(self):
@@ -208,7 +208,7 @@ class YourPrsSectionTest(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             menu.mine_block(s["mine"][0], {"plaxdan": "Woods"}, 2)
         lines = out.getvalue().splitlines()
-        self.assertTrue(lines[0].startswith("🟡 ABC-9168 · Reply to Woods: 1 suggestion"))
+        self.assertTrue(lines[0].startswith("🟡 ABC-9168 · Woods left 1 suggestion"))
         dismiss = next(i for i, x in enumerate(lines) if "alternate=true" in x)
         last_child = max(i for i, x in enumerate(lines) if x.startswith("--"))
         self.assertGreater(dismiss, last_child)

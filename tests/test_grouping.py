@@ -120,8 +120,8 @@ class GroupedTest(unittest.TestCase):
         top = [x for x in lines if not x.startswith("--")]
         self.assertEqual(top[0], "── Waiting on others ──")
         self.assertEqual(top[1], "📘 ABC-1 the story · story · 2 sub-tasks")
-        self.assertTrue(top[2].startswith(menu.TREE_INDENT + "├ ABC-2 api · "))
-        self.assertTrue(top[3].startswith(menu.TREE_INDENT + "└ ABC-3 web · "))
+        self.assertTrue(top[2].startswith(menu.TREE_INDENT + "├ " + menu.NO_DOT + "ABC-2 api · "))
+        self.assertTrue(top[3].startswith(menu.TREE_INDENT + "└ " + menu.NO_DOT + "ABC-3 web · "))
         # each PR keeps its own submenu, right under its row
         self.assertTrue(lines[lines.index(top[2]) + 1].startswith("--api#1 · "))
 

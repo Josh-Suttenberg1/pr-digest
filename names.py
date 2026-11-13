@@ -5,7 +5,10 @@ reads the callers use (`get`, `in`, `[]`). A login whose profile has no name, or
 that couldn't be looked up, maps to itself through `get`.
 
 A login listed in the config's `[names]` table shows that name instead, with no lookup.
-Other names come from `gh api users/<login>` and are cached in state/names.json for
+Other people show by the first word of their profile name ("Daipayan" for "Daipayan
+Sahoo"), matching the first names in `[names]`; a login with no profile name shows as
+itself. Profile names come from `gh api users/<login>` and are cached whole in
+state/names.json for
 REFRESH_DAYS. Only a book made with fetch=True looks up logins it hasn't seen; the
 menu's instant render passes fetch=False and reads the cache, which the menu's
 background fetch and the watcher's tick keep filled.
@@ -52,6 +55,12 @@ def _save(path: Path, data: dict) -> None:
         pass
 
 
+def _first(name: str) -> str:
+    """'Ada' from 'Ada Lovelace'; '' stays ''."""
+    words = name.split()
+    return words[0] if words else ""
+
+
 class Book:
     def __init__(self, fetch: bool, path: Path = CACHE, lookup=_gh_name, now=time.time,
                  overrides: dict[str, str] | None = None):
@@ -70,13 +79,13 @@ class Book:
         hit = self._cache.get(login)
         fresh = hit and self._now() - hit.get("at", 0) < REFRESH_DAYS * 86400
         if fresh or not self._fetch:
-            return (hit or {}).get("name", "")
+            return _first((hit or {}).get("name", ""))
         name = self._lookup(login)
         if name is None:
-            return (hit or {}).get("name", "")
+            return _first((hit or {}).get("name", ""))
         self._cache[login] = {"name": name, "at": int(self._now())}
         _save(self._path, self._cache)
-        return name
+        return _first(name)
 
     def get(self, login: str, default: str | None = None) -> str | None:
         return self._resolve(login) or default

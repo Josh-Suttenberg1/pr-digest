@@ -44,7 +44,7 @@ class BuildSectionsTest(unittest.TestCase):
         self.assertEqual(s["count"], 0)      # a new review request (green) isn't counted
         self.assertEqual(s["title"], "✓")
         self.assertEqual([(e["color"], e["reason"]) for e in s["other"]],
-                         [("low", "Parked: CI failing (build)")])
+                         [("low", "Parked · CI failing (build)")])
 
     def test_followups_are_one_row_per_pr_and_only_open_jobs_count(self):
         def job(pr_id, status, at="2026-01-01T00:00:00Z"):
@@ -92,18 +92,18 @@ class BuildSectionsTest(unittest.TestCase):
         s = menu.build_sections(data, [])
         by_url = {e["url"]: e["reason"] for e in s["other"]}
         self.assertEqual(by_url["https://github.com/acme/api/pull/1"],
-                         "0 approvals, no change requests")
+                         "dev opened it · 0 approvals, no change requests")
         self.assertEqual(by_url["https://github.com/acme/api/pull/2"],
-                         "Waiting on the author · 0 of 2 approvals")
+                         "Waiting on dev to answer you · 0 of 2 approvals")
         self.assertEqual(by_url["https://github.com/acme/api/pull/3"],
-                         "GitHub draft, not ready for review")
+                         "dev's GitHub draft, not ready for review")
         self.assertEqual(by_url["https://github.com/acme/api/pull/4"], "Not on you")
         self.assertNotIn("https://github.com/acme/web/pull/9", by_url)   # under Your PRs
         self.assertEqual([e["url"] for e in s["mine_drafts"]],
                          ["https://github.com/acme/web/pull/9"])
         self.assertIn("check this", by_url["https://github.com/acme/api/pull/7"])
         self.assertEqual(len(s["other"]), 5)   # no PR listed twice
-        # Waiting on the author has no dot; the rest is ⚪ under Nothing needed.
+        # Waiting on its author has no dot; the rest is ⚪ under Nothing needed.
         self.assertEqual([e["url"] for e in s["others_waiting"]],
                          ["https://github.com/acme/api/pull/2"])
         self.assertIsNone(s["others_waiting"][0]["color"])
@@ -112,8 +112,8 @@ class BuildSectionsTest(unittest.TestCase):
         self.assertEqual(s["count"], 0)
         self.assertEqual(s["title"], "✓")    # ⚪ rows never count
         self.assertEqual([e["reason"] for e in s["other"]][:2],
-                         ["Waiting on the author · 0 of 2 approvals",
-                          "0 approvals, no change requests"])
+                         ["Waiting on dev to answer you · 0 of 2 approvals",
+                          "dev opened it · 0 approvals, no change requests"])
 
     def test_other_prs_needs_you_mixes_follow_ups_and_reviews_by_severity(self):
         def job(pr_id, blocking):
@@ -193,6 +193,18 @@ def gql_pr(threads=(), reviews=(), comments=(), decision=None):
                                          "comments": {"nodes": list(t)}} for t in threads]},
             "reviews": {"nodes": list(reviews)},
             "comments": {"nodes": list(comments)}}
+
+
+class RowTextTest(unittest.TestCase):
+    def test_a_row_without_a_dot_keeps_a_dots_width_so_keys_line_up(self):
+        url = "https://github.com/acme/api/pull/5"
+        plain = menu.row_text({"url": url, "title": "ABC-5: thing", "color": None,
+                               "reason": "Ready · 2 of 2 approvals"})
+        dotted = menu.row_text({"url": url, "title": "ABC-5: thing", "color": "red",
+                                "reason": "Ready · 2 of 2 approvals"})
+        self.assertTrue(plain.startswith(menu.NO_DOT + "ABC-5 · Ready · 2 of 2 approvals"))
+        self.assertTrue(dotted.startswith("🔴 ABC-5 · Ready"))
+        self.assertTrue(menu.NO_DOT[0].strip())     # leads with a non-whitespace blank
 
 
 class MineAnalyzeTest(unittest.TestCase):

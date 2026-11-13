@@ -180,7 +180,7 @@ class AnnounceTest(unittest.TestCase):
         [note] = self.announce()
         self.assertEqual((note["key"], note["color"], note["team"], note["draft"]),
                          ("ui#2", P.GREEN, True, None))
-        self.assertEqual(note["reason"], "Review it · 0 of 2 approvals · today")
+        self.assertEqual(note["reason"], "plaxdan opened it · 0 of 2 approvals · today")
         self.assertEqual(self.announce(), [])
 
     def test_turning_drafts_on_later_doesnt_announce_it_again(self):
@@ -200,7 +200,7 @@ class NotifyTest(unittest.TestCase):
         sent = []
         note = {"pr": {"url": pr_url(9125), "repo": "ui", "number": 9125, "author": "plaxdan",
                        "key": "WS-5850", "title": "[WS-5850] Supplier settings"},
-                "color": P.YELLOW, "reason": "Review it · 1 of 2 approvals · 21d",
+                "color": P.YELLOW, "reason": "dev opened it · 1 of 2 approvals · 21d",
                 "draft": None, "url": pr_url(9125), "key": "ui#9125", "team": True}
         with mock.patch("names.book", lambda fetch=False: {"plaxdan": "Woods"}), \
                 mock.patch.object(popups, "send", lambda *a, **k: sent.append((a, k))), \

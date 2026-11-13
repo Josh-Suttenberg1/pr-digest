@@ -147,18 +147,26 @@ For a glanceable view instead of a file, there's a [SwiftBar](https://swiftbar.a
 plugin. Every PR gets **one row** with a priority dot, and the menu-bar title counts
 PRs per color, e.g. `🔴2 🟡1` (`✓` when there's nothing to do). A grey legend at
 the top explains the dots: 🔴 act now · 🟡 act soon · 🟢 new · ⚪ no action
-needed. Each row
-reads `<dot> <ticket> · <what happened> · <PR title>`, so the ticket always says which
-PR it is and truncation cuts the title, not the action. The dropdown has two
-sections, and each PR appears in exactly one:
+needed. Every row reads the same way:
+
+    <dot> <ticket> · <who did what> · <extras> · <approvals> · <age> · <PR title>
+
+The ticket always says which PR it is, and truncation cuts the title, not the
+action. *Who did what* starts with a person, by the `[names]` table ("Dwight opened
+it", "Woods requested changes: 2 nits", "Waiting on Kyler to re-review"), never "the
+author". `·` separates the parts, and `:` only attaches detail to its own part.
+*Extras* are the draft's state, who else is on it, or Claude's verdict. The age is
+the time since the event the row names; Ready, GitHub-draft and Nothing-needed rows
+have none. A row with no dot keeps a dot's width of blank, so every ticket key lines
+up. The dropdown has two sections, and each PR appears in exactly one:
 
 1. **My PRs** — every open PR you author, under three sub-headers:
    - **Needs you:** 🔴 for a change request you haven't re-requested, or any comment
-     to answer that isn't a nit or a suggestion (`Answer Mykal's change request: 1
+     to answer that isn't a nit or a suggestion (`Mykal requested changes: 1
      question · 1 of 2 approvals · 1d`). 🟡 when only nits and suggestions wait
-     (`Reply to Woods: 3 suggestions, 5 nits · 2 of 2 approvals · today`).
+     (`Woods left 3 suggestions, 5 nits · 2 of 2 approvals · today`).
    - **Waiting on others:** who you're waiting on and since when, for a review or a
-     re-review (`Waiting on re-review: Mykal · 5d`). 🟡 once the wait passes
+     re-review (`Waiting on Mykal to re-review · 1 of 2 approvals · 5d`). 🟡 once the wait passes
      `[priority] stale_after_days`, as a cue to nudge them.
    - **Ready:** the required approvals, nothing to answer and no change request
      standing. In a repo whose rules require an approval of the latest push (ui), a
@@ -180,14 +188,17 @@ sections, and each PR appears in exactly one:
        Dismiss), then **Post the drafted replies** and the review draft's actions.
      - A review you owe is a PR you haven't reviewed yet (or whose review of yours was
        dismissed): one that requests you, or a teammate's (`[triage] team`) that
-       doesn't, counted from when it was ready for review. 🟡 when stalled: waiting more than `[priority] stale_after_days`,
+       doesn't: `Dwight opened it · 0 of 2 approvals · 7d`, aged from when the PR was
+       opened (or last marked ready for review). Its color counts from when it landed
+       on you. 🟡 when stalled: waiting more than `[priority] stale_after_days`,
        under the required approvals, and at most `max_engaged_for_stale` others
        engaged. 🟢 otherwise. Each row has its review draft's status and actions.
-       With `[review] auto_draft` on, the row names who approved and the draft's
-       state (`Review it · Mykal approved (1 of 2) · draft ready · 5d`), its tooltip
+       With `[review] auto_draft` on, the row says the draft's state (`Dwight opened
+       it · draft ready · 1 of 2 approvals · 5d`, who approved is in the submenu), its tooltip
        says what the draft cost, and it appears only once the draft is ready.
    - **Waiting on others:** PRs you left comments or a change request on whose author
-     hasn't responded to them yet, with how long since your review. No dot.
+     hasn't responded to them yet (`Waiting on Dwight to answer you`), with how long
+     since your review. No dot.
    - **Nothing needed (N):** a collapsed submenu with the rest (parked, already
      approved, GitHub drafts), each with the reason in words. ⚪, never counted, never
      notified.

@@ -128,14 +128,15 @@ class ClassifyTest(unittest.TestCase):
         return P.classify([], reviews, [], nick={"mykal": "Mykal"},
                           now=datetime.fromtimestamp(NOW, timezone.utc), drafts=drafts)
 
-    def test_the_row_names_who_approved_and_the_draft_state(self):
+    def test_the_row_says_the_draft_state_and_the_why_names_who_approved(self):
         [e] = self.classify({URL: {"state": A.READY, "tooltip": "Draft cost $3.00"}})
-        self.assertEqual(e["reason"], "Review it · Mykal approved (1 of 2) · draft ready · 5d")
+        self.assertEqual(e["reason"], "dev opened it · draft ready · 1 of 2 approvals · 5d")
+        self.assertIn("1 approval (Mykal)", e["why"])
         self.assertEqual(e["tooltip"], "Draft cost $3.00")
 
     def test_no_approvals(self):
         [e] = self.classify({URL: {"state": A.NO_DRAFT}}, approvals=[], engaged=[])
-        self.assertEqual(e["reason"], "Review it · 0 of 2 approvals · no draft · 5d")
+        self.assertEqual(e["reason"], "dev opened it · no draft · 0 of 2 approvals · 5d")
 
     def test_a_review_without_a_state_has_no_row(self):
         self.assertEqual(self.classify({URL: {"state": None}}), [])
@@ -143,7 +144,7 @@ class ClassifyTest(unittest.TestCase):
 
     def test_off_leaves_the_row_as_it_was(self):
         [e] = self.classify(None)
-        self.assertEqual(e["reason"], "Review it · 1 of 2 approvals · 5d")
+        self.assertEqual(e["reason"], "dev opened it · 1 of 2 approvals · 5d")
 
 
 class StoreTest(unittest.TestCase):
@@ -339,7 +340,7 @@ class TickTest(unittest.TestCase):
         A.save_job(j)
         [note] = self.tick(NOW + 120)
         self.assertEqual(note["state"], A.READY)
-        self.assertEqual(note["reason"], "Review it · 0 of 2 approvals · draft ready · today")
+        self.assertEqual(note["reason"], "dev opened it · draft ready · 0 of 2 approvals · today")
         self.assertEqual(note["draft"], str(draft))
         self.assertEqual(note["color"], P.GREEN)
         self.assertEqual(self.tick(NOW + 240), [])

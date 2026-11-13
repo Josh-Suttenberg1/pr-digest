@@ -253,7 +253,7 @@ class ChangeRequestRowTest(unittest.TestCase):
         e = self.classify([cr_job()])
         self.assertEqual((e["section"], e["group"], e["color"]), (P.FOLLOWUP, P.NEEDS, P.RED))
         self.assertEqual(e["reason"], "DaVinci pushed commits since your change request · "
-                                      "1 of 2 approvals")
+                                      "1 of 2 approvals · today")
         self.assertEqual(e["why"], "Why it's red: DaVinci pushed commits while your change "
                                    "request stands")
 
@@ -262,12 +262,13 @@ class ChangeRequestRowTest(unittest.TestCase):
                                   verdict="partly")],
                           reason="you requested changes; the author commented on the PR")
         self.assertEqual(e["reason"], "DaVinci pushed commits and commented since your change "
-                                      "request · Claude: partly addressed · 1 of 2 approvals")
+                                      "request · Claude: partly addressed · 1 of 2 approvals · "
+                                      "today")
 
     def test_a_review_body_counts(self):
         e = self.classify([cr_job(triggers=("review",))])
         self.assertEqual(e["reason"], "DaVinci answered in a review since your change request · "
-                                      "1 of 2 approvals")
+                                      "1 of 2 approvals · today")
 
     def test_dismissing_the_row_clears_it_until_a_newer_response(self):
         e = self.classify([cr_job()], dismissed={URL: "2026-11-12T09:30:00+00:00"})

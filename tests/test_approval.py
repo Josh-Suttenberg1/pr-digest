@@ -176,8 +176,8 @@ class RowTest(unittest.TestCase):
         f = P.followup([cr_job(), t_job()], NICK, author=AUTHOR, approvals=1, required=2,
                        rerequested_at="2026-11-12T14:44:23Z", approval=self.ready())
         self.assertEqual(f["color"], P.RED)
-        self.assertEqual(f["reason"], "Ready to approve · DaVinci addressed your blocking "
-                                      "comment and change request · 1 of 2 approvals")
+        self.assertEqual(f["reason"], "DaVinci addressed your blocking comment and change "
+                                      "request · ready to approve · 1 of 2 approvals")
         self.assertEqual(f["why"], "Why it's red: Claude found your blocking comment and change "
                                    "request addressed; approving is one click")
         self.assertTrue(f["approval"]["ready"])
@@ -187,7 +187,7 @@ class RowTest(unittest.TestCase):
                    "actor": "mthomas46", "created_at": "2026-11-12T15:10:00Z"}
         f = P.followup([cr_job(), t_job(), mention], {**NICK, "mthomas46": "Mykal"},
                        author=AUTHOR, approval=self.ready())
-        self.assertIn("Ready to approve", f["reason"])
+        self.assertIn("ready to approve", f["reason"])
         self.assertIn("Mykal mentioned you", f["reason"])
 
     def test_not_ready_keeps_the_usual_row(self):
@@ -207,7 +207,8 @@ class RowTest(unittest.TestCase):
         [e] = P.classify([], {"needs_you": [st]}, [cr_job(), t_job()], nick=NICK,
                          now=datetime(2026, 11, 12, 18, tzinfo=timezone.utc),
                          approvals={URL: self.ready()})
-        self.assertTrue(e["reason"].startswith("Ready to approve"))
+        self.assertTrue(e["reason"].startswith("DaVinci addressed"))
+        self.assertIn("ready to approve", e["reason"])
 
     def test_the_popup_after_drafts_says_it_too(self):
         pending = {"PR870": {"pr": {**PR, "kind": "others"}, "events": [],
@@ -217,7 +218,7 @@ class RowTest(unittest.TestCase):
             [], pending, [cr_job(), t_job()], "2026-11-12T15:02:00Z", NICK, ME,
             needs={"PR870": needs})
         self.assertEqual(color, P.RED)
-        self.assertTrue(reason.startswith("Ready to approve · DaVinci addressed"))
+        self.assertTrue(reason.startswith("DaVinci addressed"))
 
 
 class MenuTest(unittest.TestCase):

@@ -355,6 +355,7 @@ def _review_state(url: str, pr: dict, me: str, teams: list[str]) -> dict | None:
         return None
     author = (pull.get("user") or {}).get("login", "")
     decisions: dict[str, tuple[str, str]] = {}
+    decided_at: dict[str, str] = {}     # login -> when their standing decision was made
     commented = False
     my_review: tuple[str, str] = ("", "")   # (submitted_at, commit sha) of your latest review
     for review in sorted(reviews, key=lambda r: r.get("submitted_at") or ""):
@@ -368,6 +369,7 @@ def _review_state(url: str, pr: dict, me: str, teams: list[str]) -> dict | None:
                          (review.get("commit_id") or "").lower())
         if state in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
             decisions[user] = (state, (review.get("commit_id") or "").lower())
+            decided_at[user] = review.get("submitted_at") or ""
     reviewers = sorted({(r.get("user") or {}).get("login", "") for r in reviews
                         if not _is_bot_user(r.get("user"))} - {"", author, me})
     requested_direct = any((u or {}).get("login") == me
@@ -390,6 +392,8 @@ def _review_state(url: str, pr: dict, me: str, teams: list[str]) -> dict | None:
         "approvals": sorted(u for u, (s, _) in decisions.items() if s == "APPROVED"),
         "change_requests": {u: sha for u, (s, sha) in decisions.items()
                             if s == "CHANGES_REQUESTED" and u != me},
+        "change_requested_at": {u: decided_at[u] for u, (s, _) in decisions.items()
+                                if s == "CHANGES_REQUESTED" and u != me},
         "mine": decisions.get(me),
         "commented": commented,
         "my_review": my_review,
@@ -438,6 +442,14 @@ def _rerequested_at(st: dict, since: str) -> str:
               if ev.get("event") == "review_requested" and _requests_me(st, ev)
               and _is_after(ev.get("created_at"), since)]
     return min(stamps, default="")
+
+
+def _touched_at(st: dict) -> str:
+    """When you last reviewed or left a top-level comment on the PR ('' if never):
+    `_my_last_touch`'s time, without its commit lookup."""
+    mine = [c.get("created_at") or "" for c in _issue_comments(st)
+            if (c.get("user") or {}).get("login") == st["me"]]
+    return max([st["my_review"][0] or "", *mine])
 
 
 def _my_last_touch(st: dict) -> tuple[str, str]:
@@ -610,6 +622,14 @@ def _ci_failing(st: dict) -> list[str]:
     return sorted(failed - passed)
 
 
+def _opened_at(st: dict) -> str:
+    """When the PR was opened for review: created, or last marked ready for review if
+    it started as a GitHub draft."""
+    ready = [ev.get("created_at") or "" for ev in _timeline(st)
+             if ev.get("event") == "ready_for_review"]
+    return max([st.get("created_at") or "", *ready])
+
+
 def _waiting_since(st: dict) -> str:
     """When the PR landed on you. For a first review: when your review (or one of your
     teams') was first requested, or when the PR last left draft if that is later. For
@@ -702,6 +722,7 @@ def _rank(st: dict) -> None:
         score += 1
         tags.append("quick")
     st["waiting_since"] = _waiting_since(st)
+    st["opened_at"] = _opened_at(st)
     waited = _days_since(st["waiting_since"])
     score += min(waited, MAX_WAIT_DAYS) / 2
     tags.append(f"waiting {int(waited)}d" if waited >= 1 else "waiting <1d")
@@ -733,6 +754,7 @@ def _triage_one(url: str, pr: dict, me: str, teams: list[str],
     st["bucket"], st["reason"] = _triage(st)
     st["draft"] = next((d for d in drafts if d["pr_url"] == url), None)
     st["draft_path"], st["freshness"] = draft_freshness(url, st["head_sha"], drafts)
+    st["touched_at"] = _touched_at(st)
     if st["bucket"] == "needs_you":
         _rank(st)
         st["engaged"] = _engaged(st)
